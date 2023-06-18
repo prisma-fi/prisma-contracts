@@ -259,19 +259,21 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         @param claimant Address that is claiming the tokens
         @param receiver Address to transfer tokens to
         @param amount Desired amount of tokens to transfer. This value always assumes max boost.
-        @return uint256 Actual amount of tokens transferred, plus the sum left behind due to
+        @return claimed Actual amount of tokens transferred, plus the sum left behind due to
                         insufficient boost. May be less than `amount` if tokens were locked.
      */
-    function transferAllocatedTokens(address claimant, address receiver, uint256 amount) external returns (uint256) {
-        allocated[msg.sender] -= amount;
-        amount += pendingRewardFor[claimant];
-        pendingRewardFor[claimant] = 0;
-        uint256 claimed;
+    function transferAllocatedTokens(
+        address claimant,
+        address receiver,
+        uint256 amount
+    ) external returns (uint256 claimed) {
         if (amount > 0) {
+            allocated[msg.sender] -= amount;
+            amount += pendingRewardFor[claimant];
+            pendingRewardFor[claimant] = 0;
             claimed = _transferAllocated(claimant, receiver, address(0), amount);
             pendingRewardFor[claimant] += amount - claimed;
         }
-
         return claimed;
     }
 
