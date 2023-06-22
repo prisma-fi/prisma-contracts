@@ -93,8 +93,6 @@ interface ITroveManager {
 
     function getTCR(uint _price) external view returns (uint);
 
-    function checkRecoveryMode(uint _price) external view returns (bool);
-
     function defaultedCollateral() external view returns (uint256);
 
     function defaultedDebt() external view returns (uint256);

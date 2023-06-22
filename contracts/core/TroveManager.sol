@@ -401,12 +401,19 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         return Troves[_borrower].stake;
     }
 
-    function getTroveCollAndDebt(address _borrower) external view returns (uint256, uint256) {
-        Trove storage t = Troves[_borrower];
-        return (t.coll, t.debt);
+    /**
+        @notice Get the current total collateral and debt amounts for a trove
+        @dev Also includes pending rewards from redistribution
+     */
+    function getTroveCollAndDebt(address _borrower) public view returns (uint256 coll, uint256 debt) {
+        (debt, coll, , ) = getEntireDebtAndColl(_borrower);
+        return (coll, debt);
     }
 
-    // Return the Troves entire debt and coll, including pending rewards from redistributions.
+    /**
+        @notice Get the total and pending collateral and debt amounts for a trove
+        @dev Used by the liquidation manager
+     */
     function getEntireDebtAndColl(
         address _borrower
     ) public view returns (uint256 debt, uint256 coll, uint256 pendingDebtReward, uint256 pendingCollateralReward) {
@@ -452,17 +459,11 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         return (getEntireSystemColl(), getEntireSystemDebt(), fetchPrice());
     }
 
-    function checkRecoveryMode(uint256 _price) public view returns (bool) {
-        uint256 TCR = getTCR(_price);
-
-        return TCR < CCR;
-    }
-
     // --- Helper functions ---
 
     // Return the nominal collateral ratio (ICR) of a given Trove, without the price. Takes a trove's pending coll and debt rewards from redistributions into account.
     function getNominalICR(address _borrower) public view returns (uint256) {
-        (uint256 currentCollateral, uint256 currentDebt) = _getCurrentTroveAmounts(_borrower);
+        (uint256 currentCollateral, uint256 currentDebt) = getTroveCollAndDebt(_borrower);
 
         uint256 NICR = PrismaMath._computeNominalCR(currentCollateral, currentDebt);
         return NICR;
@@ -470,7 +471,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
     // Return the current collateral ratio (ICR) of a given Trove. Takes a trove's pending coll and debt rewards from redistributions into account.
     function getCurrentICR(address _borrower, uint256 _price) public view returns (uint256) {
-        (uint256 currentCollateral, uint256 currentDebt) = _getCurrentTroveAmounts(_borrower);
+        (uint256 currentCollateral, uint256 currentDebt) = getTroveCollAndDebt(_borrower);
 
         uint256 ICR = PrismaMath._computeCR(currentCollateral, currentDebt, _price);
         return ICR;
@@ -483,10 +484,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         TCR = PrismaMath._computeCR(entireSystemColl, entireSystemDebt, _price);
 
         return TCR;
-    }
-
-    function _getCurrentTroveAmounts(address _borrower) internal view returns (uint256 coll, uint256 debt) {
-        (debt, coll, , ) = getEntireDebtAndColl(_borrower);
     }
 
     function getTotalActiveCollateral() public view returns (uint256) {
@@ -1318,12 +1315,8 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         emit SystemSnapshotsUpdated(totalStakesSnapshot, totalCollateralSnapshot);
 
         // send gas compensation
-        if (_debt > 0) {
-            debtToken.returnFromPool(gasPoolAddress, _liquidator, _debtGasComp);
-        }
-        if (_collGasComp > 0) {
-            _sendCollateral(_liquidator, _collGasComp);
-        }
+        debtToken.returnFromPool(gasPoolAddress, _liquidator, _debtGasComp);
+        _sendCollateral(_liquidator, _collGasComp);
     }
 
     function _redistributeDebtAndColl(uint256 _debt, uint256 _coll) internal {

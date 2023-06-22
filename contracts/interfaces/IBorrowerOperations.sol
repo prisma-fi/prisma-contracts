@@ -68,4 +68,6 @@ interface IBorrowerOperations {
     function getCompositeDebt(uint _debt) external view returns (uint);
 
     function minNetDebt() external view returns (uint);
+
+    function getGlobalSystemBalances() external returns (uint256 totalPricedCollateral, uint256 totalDebt);
 }
