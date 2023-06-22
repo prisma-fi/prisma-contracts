@@ -586,4 +586,9 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
 
         return (balances.prices[index], totalPricedCollateral, totalDebt, isRecoveryMode);
     }
+
+    function getGlobalSystemBalances() external returns (uint256 totalPricedCollateral, uint256 totalDebt) {
+        SystemBalances memory balances = fetchBalances();
+        (, totalPricedCollateral, totalDebt) = getTCR(balances);
+    }
 }
