@@ -79,7 +79,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
     uint256 public systemDeploymentTime;
     bool public sunsetting;
-    bool private paused;
+    bool public paused;
 
     uint256 public baseRate;
 
@@ -279,7 +279,8 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
      *         - New collateral deposits are not possible
      * @param _paused If true the protocol is paused
      */
-    function setPaused(bool _paused) external onlyOwner {
+    function setPaused(bool _paused) external {
+        require((_paused && msg.sender == guardian()) || msg.sender == owner(), "Unauthorized");
         paused = _paused;
     }
 
