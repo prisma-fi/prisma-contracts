@@ -22,6 +22,8 @@ contract PrismaCore {
     address public pendingOwner;
     uint256 public ownershipTransferDeadline;
 
+    address public guardian;
+
     // We enforce a three day delay between committing and applying
     // an ownership change, as a sanity check on a proposed new owner
     // and to give users time to react in case the act is malicious.
@@ -44,16 +46,20 @@ contract PrismaCore {
 
     event PriceFeedSet(address priceFeed);
 
+    event GuardianSet(address guardian);
+
     event Paused();
 
     event Unpaused();
 
     event CollateralSunsetStarted(address collateral);
 
-    constructor(address _owner, IStabilityPool _stabilityPool) {
+    constructor(address _owner, address _guardian, IStabilityPool _stabilityPool) {
         owner = _owner;
         startTime = (block.timestamp / 1 weeks) * 1 weeks;
         stabilityPool = _stabilityPool;
+        guardian = _guardian;
+        emit GuardianSet(_guardian);
     }
 
     modifier onlyOwner() {
@@ -80,6 +86,16 @@ contract PrismaCore {
     }
 
     /**
+     * @notice Set the guardian address
+               The guardian can execute some emergency actions
+     * @param _guardian Guardian address
+     */
+    function setGuardian(address _guardian) external onlyOwner {
+        guardian = _guardian;
+        emit GuardianSet(_guardian);
+    }
+
+    /**
      * @notice Sets the global pause state of the protocol
      *         Pausing is used to mitigate risks in exceptional circumstances
      *         Functionalities affected by pausing are:
@@ -88,7 +104,8 @@ contract PrismaCore {
      *         - New stability pool deposits are not possible
      * @param _paused If true the protocol is paused
      */
-    function setPaused(bool _paused) external onlyOwner {
+    function setPaused(bool _paused) external {
+        require((_paused && msg.sender == guardian) || msg.sender == owner, "Unauthorized");
         paused = _paused;
         if (_paused) {
             emit Paused();

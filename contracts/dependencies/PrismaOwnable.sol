@@ -24,4 +24,8 @@ contract PrismaOwnable {
     function owner() public view returns (address) {
         return PRISMA_CORE.owner();
     }
+
+    function guardian() public view returns (address) {
+        return PRISMA_CORE.guardian();
+    }
 }

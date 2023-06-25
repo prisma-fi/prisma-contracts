@@ -18,6 +18,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
 
     event ProposalCreated(address indexed account, Action[] payload, uint256 week, uint256 requiredWeight);
     event ProposalExecuted(uint256 proposalId);
+    event ProposalCancelled(uint256 proposalId);
     event VoteCast(address indexed account, uint256 id, uint256 weight, uint256 proposalCurrentWeight);
     event ProposalCreationMinWeightSet(uint256 weight);
     event ProposalPassingPctSet(uint256 pct);
@@ -27,7 +28,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         uint32 createdAt; // timestamp when the proposal was created
         uint40 currentWeight; //  amount of weight currently voting in favor
         uint40 requiredWeight; // amount of weight required for the proposal to be executed
-        bool executed; // set to true once the proposal is executed
+        bool processed; // set to true once the proposal is processed
     }
 
     struct Action {
@@ -92,7 +93,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
     {
         Proposal memory proposal = proposalData[id];
         payload = proposalPayloads[id];
-        canExecute = (!proposal.executed &&
+        canExecute = (!proposal.processed &&
             proposal.currentWeight >= proposal.requiredWeight &&
             proposal.createdAt + MIN_TIME_TO_EXECUTION < block.timestamp);
 
@@ -101,7 +102,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
             proposal.createdAt,
             proposal.currentWeight,
             proposal.requiredWeight,
-            proposal.executed,
+            proposal.processed,
             canExecute,
             payload
         );
@@ -124,16 +125,16 @@ contract AdminVoting is DelegatedOps, SystemStart {
         require(accountWeight >= minCreateProposalWeight, "Not enough weight to propose");
         uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
         uint40 requiredWeight = uint40((totalWeight * passingPct) / 100);
+        uint256 idx = proposalData.length;
         proposalData.push(
             Proposal({
                 week: uint16(week),
                 createdAt: uint32(block.timestamp),
                 currentWeight: 0,
                 requiredWeight: requiredWeight,
-                executed: false
+                processed: false
             })
         );
-        uint256 idx = proposalData.length;
 
         for (uint256 i = 0; i < payload.length; i++) {
             proposalPayloads[idx].push(payload[i]);
@@ -154,7 +155,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         require(accountVoteWeights[account][id] == 0, "Already voted");
 
         Proposal memory proposal = proposalData[id];
-        require(!proposal.executed, "Vote was already executed");
+        require(!proposal.processed, "Proposal already processed");
         require(proposal.createdAt + VOTING_PERIOD > block.timestamp, "Voting period has closed");
 
         uint256 accountWeight = tokenLocker.getAccountWeightAt(account, proposal.week);
@@ -172,6 +173,32 @@ contract AdminVoting is DelegatedOps, SystemStart {
     }
 
     /**
+        @notice Cancels a pending proposal
+        @dev Can only be called by the guardian to avoid malicious proposals
+             Guardians cannot cancel a proposal for their replacement
+        @param id Proposal ID
+     */
+    function cancelProposal(uint256 id) external {
+        require(msg.sender == prismaCore.guardian(), "Only guardian can cancel proposals");
+        require(id < proposalData.length, "Invalid ID");
+        // We make sure guardians cannot cancel proposals for their replacement
+        Action[] storage payload = proposalPayloads[id];
+        Action memory firstAction = payload[0];
+        bytes memory data = firstAction.data;
+        // Extract the call sig from payload data
+        bytes4 sig;
+        assembly {
+            sig := mload(add(data, 0x20))
+        }
+        require(
+            firstAction.target != address(prismaCore) || sig != IPrismaCore.setGuardian.selector,
+            "Guardian replacement not cancellable"
+        );
+        proposalData[id].processed = true;
+        emit ProposalCancelled(id);
+    }
+
+    /**
         @notice Execute a proposal's payload
         @dev Can only be called if the proposal has received sufficient vote weight,
              and has been active for at least `MIN_TIME_TO_EXECUTION`
@@ -182,8 +209,8 @@ contract AdminVoting is DelegatedOps, SystemStart {
         Proposal memory proposal = proposalData[id];
         require(proposal.currentWeight >= proposal.requiredWeight, "Not passed");
         require(proposal.createdAt + MIN_TIME_TO_EXECUTION < block.timestamp, "MIN_TIME_TO_EXECUTION");
-        require(!proposal.executed, "Already executed");
-        proposalData[id].executed = true;
+        require(!proposal.processed, "Already processed");
+        proposalData[id].processed = true;
 
         Action[] storage payload = proposalPayloads[id];
         uint256 payloadLength = payload.length;
