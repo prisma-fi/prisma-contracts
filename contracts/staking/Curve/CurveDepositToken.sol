@@ -113,26 +113,28 @@ contract CurveDepositToken {
         return true;
     }
 
-    function claimReward(address receiver) external returns (uint256 prismaAmount, uint256 crvAmount) {
-        _updateIntegrals(msg.sender, balanceOf[msg.sender], totalSupply);
-        uint128[2] memory amounts = pendingRewardFor[msg.sender];
-        delete pendingRewardFor[msg.sender];
+    function _claimReward(address claimant, address receiver) internal returns (uint128[2] memory amounts) {
+        _updateIntegrals(claimant, balanceOf[claimant], totalSupply);
+        amounts = pendingRewardFor[claimant];
+        delete pendingRewardFor[claimant];
 
         CRV.transfer(receiver, amounts[1]);
+        return amounts;
+    }
+
+    function claimReward(address receiver) external returns (uint256 prismaAmount, uint256 crvAmount) {
+        uint128[2] memory amounts = _claimReward(msg.sender, receiver);
         treasury.transferAllocatedTokens(msg.sender, receiver, amounts[0]);
 
         emit RewardClaimed(receiver, amounts[0], amounts[1]);
-
         return (amounts[0], amounts[1]);
     }
 
     function treasuryClaimReward(address claimant, address receiver) external returns (uint256) {
         require(msg.sender == address(treasury));
-        uint128[2] memory amounts = pendingRewardFor[claimant];
-        delete pendingRewardFor[claimant];
+        uint128[2] memory amounts = _claimReward(claimant, receiver);
 
-        CRV.transfer(receiver, amounts[1]);
-
+        emit RewardClaimed(receiver, 0, amounts[1]);
         return amounts[0];
     }
 

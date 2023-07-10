@@ -154,18 +154,23 @@ contract ConvexDepositToken {
         return true;
     }
 
-    function claimReward(
-        address receiver
-    ) external returns (uint256 prismaAmount, uint256 crvAmount, uint256 cvxAmount) {
-        _updateIntegrals(msg.sender, balanceOf[msg.sender], totalSupply);
-
-        uint128[3] memory amounts = pendingRewardFor[msg.sender];
-        delete pendingRewardFor[msg.sender];
+    function _claimReward(address claimant, address receiver) internal returns (uint128[3] memory amounts) {
+        _updateIntegrals(claimant, balanceOf[claimant], totalSupply);
+        amounts = pendingRewardFor[claimant];
+        delete pendingRewardFor[claimant];
         lastCrvBalance -= amounts[1];
         lastCvxBalance -= amounts[2];
 
         CRV.transfer(receiver, amounts[1]);
         CVX.transfer(receiver, amounts[2]);
+
+        return amounts;
+    }
+
+    function claimReward(
+        address receiver
+    ) external returns (uint256 prismaAmount, uint256 crvAmount, uint256 cvxAmount) {
+        uint128[3] memory amounts = _claimReward(msg.sender, receiver);
         treasury.transferAllocatedTokens(msg.sender, receiver, amounts[0]);
 
         emit RewardClaimed(receiver, amounts[0], amounts[1], amounts[2]);
@@ -174,13 +179,9 @@ contract ConvexDepositToken {
 
     function treasuryClaimReward(address claimant, address receiver) external returns (uint256) {
         require(msg.sender == address(treasury));
-        _updateIntegrals(claimant, balanceOf[claimant], totalSupply);
-        uint128[3] memory amounts = pendingRewardFor[claimant];
-        delete pendingRewardFor[claimant];
+        uint128[3] memory amounts = _claimReward(claimant, receiver);
 
-        CRV.transfer(receiver, amounts[1]);
-        CVX.transfer(receiver, amounts[2]);
-
+        emit RewardClaimed(claimant, 0, amounts[1], amounts[2]);
         return amounts[0];
     }
 
