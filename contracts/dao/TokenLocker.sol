@@ -179,7 +179,7 @@ contract TokenLocker is SystemStart {
         }
 
         uint256 bitfield = accountData.updateWeeks[accountWeek / 256] >> (accountWeek % 256);
-        while (accountWeek < systemWeek) {
+        while (accountWeek < week) {
             accountWeek++;
             weight -= locked;
             if (accountWeek % 256 == 0) {
