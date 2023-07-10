@@ -271,7 +271,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
             allocated[msg.sender] -= amount;
             amount += pendingRewardFor[claimant];
             pendingRewardFor[claimant] = 0;
-            claimed = _transferAllocated(claimant, receiver, address(0), amount);
+            claimed = _transferAllocated(0, claimant, receiver, address(0), amount);
             pendingRewardFor[claimant] += amount - claimed;
         }
         return claimed;
@@ -285,14 +285,17 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
                              `address(0)` to use the boost of the claimer.
         @param rewardContracts Array of addresses of registered receiver contracts where
                                the caller has pending rewards to claim.
+        @param maxFeePct Maximum fee percent to pay to delegate, as a whole number out of 10000
         @return uint256 Actual amount of tokens transferred, plus the sum left behind due to
                         insufficient boost. May be less than `amount` if tokens were locked.
      */
     function batchClaimRewards(
         address receiver,
         address boostDelegate,
-        IRewards[] calldata rewardContracts
+        IRewards[] calldata rewardContracts,
+        uint256 maxFeePct
     ) external returns (uint256) {
+        require(maxFeePct <= 10000, "Invalid maxFeePct");
         uint256 total = pendingRewardFor[msg.sender];
         pendingRewardFor[msg.sender] = 0;
 
@@ -302,12 +305,13 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
             allocated[address(rewardContracts[i])] -= amount;
             total += amount;
         }
-        uint256 claimed = _transferAllocated(msg.sender, receiver, boostDelegate, total);
+        uint256 claimed = _transferAllocated(maxFeePct, msg.sender, receiver, boostDelegate, total);
         pendingRewardFor[msg.sender] += total - claimed;
         return claimed;
     }
 
     function _transferAllocated(
+        uint256 maxFeePct,
         address account,
         address receiver,
         address boostDelegate,
@@ -330,6 +334,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
                     fee = delegateCallback.getFeePct(account, amount, previousAmount, totalWeekly);
                     require(fee <= 10000, "Invalid delegate fee");
                 } else fee = data.feePct;
+                require(fee <= maxFeePct, "fee exceeds maxFeePct");
             }
 
             // calculate adjusted amount with actual boost applied
