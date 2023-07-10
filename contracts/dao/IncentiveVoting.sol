@@ -309,6 +309,38 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
     }
 
     /**
+        @notice Clear registered weight and votes for `account`
+        @dev Called by `tokenLocker` when an account performs an early withdrawal
+             of locked tokens, to prevent a registered weight > actual lock weight
+     */
+    function clearRegisteredWeight(address account) external returns (bool) {
+        require(
+            msg.sender == account || msg.sender == address(tokenLocker) || isApprovedDelegate[account][msg.sender],
+            "Delegate not approved"
+        );
+
+        AccountData storage accountData = accountLockData[account];
+        uint256 week = getWeek();
+        uint256 length = accountData.lockLength;
+        uint256 frozenWeight = accountData.frozenWeight;
+        if (length > 0 || frozenWeight > 0) {
+            if (accountData.voteLength > 0) {
+                _removeVoteWeights(account, getAccountCurrentVotes(account), frozenWeight);
+                accountData.voteLength = 0;
+                accountData.points = 0;
+                emit ClearedVotes(account);
+            }
+            // lockLength and frozenWeight are never both > 0
+            if (length > 0) accountData.lockLength = 0;
+            else accountData.frozenWeight = 0;
+
+            emit AccountWeightRegistered(account, week, 0, new ITokenLocker.LockData[](0));
+        }
+
+        return true;
+    }
+
+    /**
         @notice Set a frozen account weight as unfrozen
         @dev Callable only by the token locker. This prevents users from
              registering frozen locks, unfreezing, and having a larger registered
