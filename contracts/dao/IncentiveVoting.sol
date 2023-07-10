@@ -32,8 +32,8 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         // a way to indicate if a lock is frozen.
         uint40 frozenWeight;
         uint16 points;
-        uint8 lockLength; // length of activeVotes
-        uint16 voteLength; // length of weeksToUnlock and lockedAmounts
+        uint8 lockLength; // length of weeksToUnlock and lockedAmounts
+        uint16 voteLength; // length of activeVotes
         // array of [(receiver id, points), ... ] stored as uint16[2] for optimal packing
         uint16[2][MAX_POINTS] activeVotes;
         // arrays map to one another: lockedAmounts[0] unlocks in weeksToUnlock[0] weeks
@@ -68,14 +68,20 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
     uint40[65535] totalWeeklyWeights;
     uint32[65535] public totalWeeklyUnlocks;
 
+    // emitted each time an account's lock weight is registered
     event AccountWeightRegistered(
         address indexed account,
-        uint256 minWeeks,
+        uint256 indexed week,
         uint256 frozenBalance,
-        ITokenLocker.LockData[] lockData
+        ITokenLocker.LockData[] registeredLockData
     );
-    event NewVotes(address indexed account, Vote[] votes, uint256 totalPointsUsed);
-    event ClearedVotes(address indexed account);
+    // emitted each time an account submits one or more new votes. only includes
+    // vote points for the current call, for a complete list of an account's votes
+    // you must join all instances of this event that fired more recently than the
+    // latest `ClearedVotes` for the the same account.
+    event NewVotes(address indexed account, uint256 indexed week, Vote[] newVotes, uint256 totalPointsUsed);
+    // emitted each time the votes for `account` are cleared
+    event ClearedVotes(address indexed account, uint256 indexed week);
 
     constructor(address _prismaCore, ITokenLocker _tokenLocker, address _treasury) SystemStart(_prismaCore) {
         tokenLocker = _tokenLocker;
@@ -217,15 +223,18 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
                         locks may wish to skip smaller locks to reduce gas costs.
      */
     function registerAccountWeight(address account, uint256 minWeeks) external callerOrDelegated(account) {
-        Vote[] memory existingVotes = getAccountCurrentVotes(account);
-        uint256 frozenWeight = accountLockData[account].frozenWeight;
+        AccountData storage accountData = accountLockData[account];
+        Vote[] memory existingVotes;
 
         // if account has an active vote, clear the recorded vote
         // weights prior to updating the registered account weights
-        _removeVoteWeights(account, existingVotes, frozenWeight);
+        if (accountData.voteLength > 0) {
+            existingVotes = getAccountCurrentVotes(account);
+            _removeVoteWeights(account, existingVotes, accountData.frozenWeight);
+        }
 
         // get updated account lock weights and store locally
-        frozenWeight = _registerAccountWeight(account, minWeeks);
+        uint256 frozenWeight = _registerAccountWeight(account, minWeeks);
 
         // resubmit the account's active vote using the newly registered weights
         _addVoteWeights(account, existingVotes, frozenWeight);
@@ -244,14 +253,16 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         Vote[] calldata votes
     ) external callerOrDelegated(account) {
         AccountData storage accountData = accountLockData[account];
-        uint256 frozenWeight = accountData.frozenWeight;
 
         // if account has an active vote, clear the recorded vote
         // weights prior to updating the registered account weights
-        _removeVoteWeights(account, getAccountCurrentVotes(account), frozenWeight);
+        if (accountData.voteLength > 0) {
+            _removeVoteWeights(account, getAccountCurrentVotes(account), accountData.frozenWeight);
+            emit ClearedVotes(account, getWeek());
+        }
 
         // get updated account lock weights and store locally
-        frozenWeight = _registerAccountWeight(account, minWeeks);
+        uint256 frozenWeight = _registerAccountWeight(account, minWeeks);
 
         // adjust vote weights based on the account's new vote
         _addVoteWeights(account, votes, frozenWeight);
@@ -283,7 +294,7 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         // optionally clear previous votes
         if (clearPrevious) {
             _removeVoteWeights(account, getAccountCurrentVotes(account), frozenWeight);
-            emit ClearedVotes(account);
+            emit ClearedVotes(account, getWeek());
         } else {
             points = accountData.points;
             offset = accountData.voteLength;
@@ -305,7 +316,7 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         accountData.voteLength = 0;
         accountData.points = 0;
 
-        emit ClearedVotes(account);
+        emit ClearedVotes(account, getWeek());
     }
 
     /**
@@ -328,7 +339,7 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
                 _removeVoteWeights(account, getAccountCurrentVotes(account), frozenWeight);
                 accountData.voteLength = 0;
                 accountData.points = 0;
-                emit ClearedVotes(account);
+                emit ClearedVotes(account, week);
             }
             // lockLength and frozenWeight are never both > 0
             if (length > 0) accountData.lockLength = 0;
@@ -354,25 +365,35 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         // if frozenWeight == 0, the account was not registered so nothing needed
         if (frozenWeight > 0) {
             // clear previous votes
-            Vote[] memory existingVotes = getAccountCurrentVotes(account);
-            if (existingVotes.length > 0) {
+            Vote[] memory existingVotes;
+            if (accountData.voteLength > 0) {
+                existingVotes = getAccountCurrentVotes(account);
                 _removeVoteWeightsFrozen(existingVotes, frozenWeight);
             }
 
-            accountData.week = uint16(getWeek());
+            uint256 week = getWeek();
+            accountData.week = uint16(week);
             accountData.frozenWeight = 0;
 
-            accountData.lockedAmounts[0] = uint32(frozenWeight / MAX_LOCK_WEEKS);
+            uint amount = frozenWeight / MAX_LOCK_WEEKS;
+            accountData.lockedAmounts[0] = uint32(amount);
             accountData.weeksToUnlock[0] = uint8(MAX_LOCK_WEEKS);
             accountData.lockLength = 1;
 
             // optionally resubmit previous votes
-            if (keepVote && existingVotes.length > 0) {
-                _addVoteWeightsUnfrozen(account, existingVotes);
-            } else {
-                accountData.voteLength = 0;
-                accountData.points = 0;
+            if (existingVotes.length > 0) {
+                if (keepVote) {
+                    _addVoteWeightsUnfrozen(account, existingVotes);
+                } else {
+                    accountData.voteLength = 0;
+                    accountData.points = 0;
+                    emit ClearedVotes(account, week);
+                }
             }
+
+            ITokenLocker.LockData[] memory lockData = new ITokenLocker.LockData[](1);
+            lockData[0] = ITokenLocker.LockData({ amount: amount, weeksToUnlock: MAX_LOCK_WEEKS });
+            emit AccountWeightRegistered(account, week, 0, lockData);
         }
         return true;
     }
@@ -430,10 +451,11 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         } else {
             revert("No active locks");
         }
-        accountData.week = uint16(getWeek());
+        uint256 week = getWeek();
+        accountData.week = uint16(week);
         accountData.lockLength = uint8(length);
 
-        emit AccountWeightRegistered(account, minWeeks, frozen, lockData);
+        emit AccountWeightRegistered(account, week, frozen, lockData);
 
         return frozen;
     }
@@ -455,7 +477,7 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
         accountData.voteLength = uint16(offset + length);
         accountData.points = uint16(points);
 
-        emit NewVotes(account, votes, points);
+        emit NewVotes(account, getWeek(), votes, points);
     }
 
     /**
