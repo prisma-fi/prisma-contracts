@@ -10,4 +10,6 @@ interface IIncentiveVoting {
     function idToReceiver(uint id) external view returns (uint);
 
     function registerNewReceiver() external returns (uint);
+
+    function clearRegisteredWeight(address account) external returns (bool);
 }
