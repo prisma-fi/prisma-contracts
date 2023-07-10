@@ -645,6 +645,9 @@ contract TokenLocker is SystemStart {
         AccountData storage accountData = accountLockData[msg.sender];
         uint32[65535] storage unlocks = accountWeeklyUnlocks[msg.sender];
 
+        uint256 accountWeight = _weeklyWeightWrite(msg.sender);
+        uint256 totalWeight = getTotalWeightWrite();
+
         // remove account locked balance from the total decay rate
         uint256 locked = accountData.locked;
         require(locked > 0, "No locked balance");
@@ -653,12 +656,10 @@ contract TokenLocker is SystemStart {
         accountData.locked = 0;
 
         uint256 systemWeek = getWeek();
-        uint256 accountWeight = _weeklyWeightWrite(msg.sender);
         accountWeeklyWeights[msg.sender][systemWeek] = uint40(locked * MAX_LOCK_WEEKS);
-        totalWeeklyWeights[systemWeek] = uint40(getTotalWeightWrite() - accountWeight + locked * MAX_LOCK_WEEKS);
+        totalWeeklyWeights[systemWeek] = uint40(totalWeight - accountWeight + locked * MAX_LOCK_WEEKS);
 
         // use bitfield to iterate acount unlocks and subtract them from the total unlocks
-
         uint256 bitfield = accountData.updateWeeks[systemWeek / 256] >> (systemWeek % 256);
         while (locked > 0) {
             systemWeek++;
