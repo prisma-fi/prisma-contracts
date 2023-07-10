@@ -778,6 +778,10 @@ contract TokenLocker is SystemStart {
             lockToken.transfer(msg.sender, amountToWithdraw * lockToTokenRatio);
             return amountToWithdraw;
         }
+
+        // clear the caller's registered vote weight
+        incentiveVoter.clearRegisteredWeight(msg.sender);
+
         uint256 remaining = amountToWithdraw;
         if (unlocked > 0) {
             remaining -= unlocked;
