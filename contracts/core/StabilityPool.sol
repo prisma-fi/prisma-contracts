@@ -2,6 +2,7 @@
 
 pragma solidity 0.8.19;
 
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../dependencies/PrismaOwnable.sol";
 import "../dependencies/SystemStart.sol";
@@ -18,6 +19,8 @@ import "../interfaces/ITreasury.sol";
             the stability pool may be used to liquidate any supported collateral type.
  */
 contract StabilityPool is PrismaOwnable, SystemStart {
+    using SafeERC20 for IERC20;
+
     uint256 public constant DECIMAL_PRECISION = 1e18;
     uint128 public constant SUNSET_DURATION = 180 days;
     uint256 constant REWARD_DURATION = 1 weeks;
@@ -689,10 +692,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
             if (gains > 0) {
                 collateralGains[collateralIndex] = gains;
                 depositorGains[collateralIndex] = 0;
-                require(
-                    collateralTokens[collateralIndex].transfer(recipient, gains),
-                    "StabilityPool: sending collateral failed"
-                );
+                collateralTokens[collateralIndex].safeTransfer(recipient, gains);
             }
             unchecked {
                 ++i;

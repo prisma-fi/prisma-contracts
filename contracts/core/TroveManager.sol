@@ -2,6 +2,7 @@
 
 pragma solidity 0.8.19;
 
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IBorrowerOperations.sol";
@@ -27,6 +28,8 @@ import "../dependencies/PrismaOwnable.sol";
             necessary to avoid the restriction on deployed bytecode size.
  */
 contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
+    using SafeERC20 for IERC20;
+
     // --- Connected contract declarations ---
 
     address public immutable borrowerOperationsAddress;
@@ -223,7 +226,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     event LTermsUpdated(uint256 _L_collateral, uint256 _L_debt);
     event TroveSnapshotsUpdated(uint256 _L_collateral, uint256 _L_debt);
     event TroveIndexUpdated(address _borrower, uint256 _newIndex);
-    event EtherSent(address _to, uint256 _amount);
+    event CollateralSent(address _to, uint256 _amount);
     event RewardClaimed(address indexed account, address indexed recipient, uint256 claimed);
 
     modifier whenNotPaused() {
@@ -847,7 +850,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
         surplusBalances[msg.sender] = 0;
 
-        require(collateralToken.transfer(_receiver, claimableColl), "Sending surplus collateral failed");
+        collateralToken.safeTransfer(_receiver, claimableColl);
     }
 
     // --- Reward Claim functions ---
@@ -1377,9 +1380,9 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     function _sendCollateral(address _account, uint256 _amount) private {
         if (_amount > 0) {
             totalActiveCollateral = totalActiveCollateral - _amount;
-            emit EtherSent(_account, _amount);
+            emit CollateralSent(_account, _amount);
 
-            require(collateralToken.transfer(_account, _amount), "Sending collateral failed");
+            collateralToken.safeTransfer(_account, _amount);
         }
     }
 
