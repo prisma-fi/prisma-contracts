@@ -2,7 +2,6 @@
 
 pragma solidity 0.8.19;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import { OFT, IERC20, ERC20 } from "@layerzerolabs/solidity-examples/contracts/token/oft/OFT.sol";
 import { IERC3156FlashBorrower } from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
 import "../interfaces/IPrismaCore.sol";
@@ -153,7 +152,7 @@ contract DebtToken is OFT {
      * @return The amount of token that can be loaned.
      */
     function maxFlashLoan(address token) public view returns (uint256) {
-        return token == address(this) ? 2 ** 128 - 1 : 0;
+        return token == address(this) ? type(uint256).max - totalSupply() : 0;
     }
 
     /**
