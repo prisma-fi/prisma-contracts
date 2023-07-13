@@ -1077,13 +1077,13 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         return (newColl, newDebt, _updateStakeAndTotalStakes(t));
     }
 
-    function closeTrove(address _borrower, uint256 collAmount, uint256 debtAmount) external {
+    function closeTrove(address _borrower, address _receiver, uint256 collAmount, uint256 debtAmount) external {
         _requireCallerIsBO();
         require(Troves[_borrower].status == Status.active, "Trove closed or does not exist");
         _removeStake(_borrower);
         _closeTrove(_borrower, Status.closedByOwner);
         totalActiveDebt = totalActiveDebt - debtAmount;
-        _sendCollateral(_borrower, collAmount);
+        _sendCollateral(_receiver, collAmount);
         _resetState();
     }
 

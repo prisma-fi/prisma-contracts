@@ -394,7 +394,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         uint256 newTCR = _getNewTCRFromTroveChange(totalPricedCollateral, totalDebt, coll * price, false, debt, false);
         _requireNewTCRisAboveCCR(newTCR);
 
-        troveManager.closeTrove(account, coll, debt);
+        troveManager.closeTrove(account, msg.sender, coll, debt);
 
         emit TroveUpdated(account, 0, 0, 0, BorrowerOperation.closeTrove);
 

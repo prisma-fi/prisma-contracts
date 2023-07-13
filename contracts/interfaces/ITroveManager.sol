@@ -54,7 +54,7 @@ interface ITroveManager {
         bool _isRecoveryMode
     ) external returns (uint stake, uint arrayIndex);
 
-    function closeTrove(address _borrower, uint collAmount, uint debtAmount) external;
+    function closeTrove(address _borrower, address _receiver, uint collAmount, uint debtAmount) external;
 
     function removeStake(address _borrower) external;
 
