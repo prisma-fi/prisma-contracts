@@ -51,7 +51,7 @@ contract MultiCollateralHintHelpers is PrismaBase {
         view
         returns (address firstRedemptionHint, uint256 partialRedemptionHintNICR, uint256 truncatedDebtAmount)
     {
-        ITroveManager troveManager = ITroveManager(factory.getTroveManager(collateral));
+        ITroveManager troveManager = ITroveManager(factory.collateralTroveManager(collateral));
         ISortedTroves sortedTrovesCached = ISortedTroves(troveManager.sortedTroves());
 
         uint256 remainingDebt = _debtAmount;
@@ -110,7 +110,7 @@ contract MultiCollateralHintHelpers is PrismaBase {
         uint256 _numTrials,
         uint256 _inputRandomSeed
     ) external view returns (address hintAddress, uint256 diff, uint256 latestRandomSeed) {
-        ITroveManager troveManager = ITroveManager(factory.getTroveManager(collateral));
+        ITroveManager troveManager = ITroveManager(factory.collateralTroveManager(collateral));
         ISortedTroves sortedTroves = ISortedTroves(troveManager.sortedTroves());
         uint256 arrayLength = troveManager.getTroveOwnersCount();
 

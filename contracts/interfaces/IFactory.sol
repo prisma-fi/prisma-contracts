@@ -3,5 +3,5 @@
 pragma solidity 0.8.19;
 
 interface IFactory {
-    function getTroveManager(address collateral) external view returns (address);
+    function collateralTroveManager(address collateral) external view returns (address);
 }

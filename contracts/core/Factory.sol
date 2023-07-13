@@ -29,8 +29,7 @@ contract Factory is PrismaOwnable {
     address public sortedTrovesImpl;
     address public troveManagerImpl;
 
-    mapping(address collateral => address troveManagerImpl) public troveManagerOverrides;
-    mapping(address collateral => bool deployed) public collateralDeployed;
+    mapping(address collateral => address troveManager) public collateralTroveManager;
 
     struct DeploymentParams {
         uint256 minuteDecayFactor;
@@ -84,20 +83,14 @@ contract Factory is PrismaOwnable {
         address customSortedTrovesImpl,
         DeploymentParams memory params
     ) external onlyOwner {
-        if (collateralDeployed[collateral]) revert CollateralAlreadyDeployed(collateral);
-        address troveManager;
-        if (customTroveManagerImpl == address(0)) {
-            troveManager = troveManagerImpl.cloneDeterministic(bytes32(bytes20(collateral)));
-        } else {
-            troveManager = customTroveManagerImpl.cloneDeterministic(bytes32(bytes20(collateral)));
-            troveManagerOverrides[collateral] = customTroveManagerImpl;
-        }
-        address sortedTroves;
-        if (customSortedTrovesImpl == address(0)) {
-            sortedTroves = sortedTrovesImpl.cloneDeterministic(bytes32(bytes20(collateral)));
-        } else {
-            sortedTroves = customSortedTrovesImpl.cloneDeterministic(bytes32(bytes20(collateral)));
-        }
+        if (collateralTroveManager[collateral] != address(0)) revert CollateralAlreadyDeployed(collateral);
+
+        address implementation = customTroveManagerImpl == address(0) ? troveManagerImpl : customTroveManagerImpl;
+        address troveManager = implementation.cloneDeterministic(bytes32(bytes20(collateral)));
+        collateralTroveManager[collateral] = troveManager;
+
+        implementation = customSortedTrovesImpl == address(0) ? sortedTrovesImpl : customSortedTrovesImpl;
+        address sortedTroves = implementation.cloneDeterministic(bytes32(bytes20(collateral)));
 
         ITroveManager(troveManager).setAddresses(priceFeed, sortedTroves, collateral);
         ISortedTroves(sortedTroves).setAddresses(troveManager);
@@ -116,19 +109,12 @@ contract Factory is PrismaOwnable {
             params.interestRate,
             params.maxDebt
         );
-        collateralDeployed[collateral] = true;
+
         emit NewDeployment(collateral, priceFeed, troveManager, sortedTroves);
     }
 
     function setImplementations(address _troveManagerImpl, address _sortedTrovesImpl) external onlyOwner {
         troveManagerImpl = _troveManagerImpl;
         sortedTrovesImpl = _sortedTrovesImpl;
-    }
-
-    function getTroveManager(address collateral) public view returns (ITroveManager) {
-        if (!collateralDeployed[collateral]) return ITroveManager(address(0));
-        address overrideImpl = troveManagerOverrides[collateral];
-        address actualTroveManagerImpl = overrideImpl == address(0) ? troveManagerImpl : overrideImpl;
-        return ITroveManager(Clones.predictDeterministicAddress(actualTroveManagerImpl, bytes32(bytes20(collateral))));
     }
 }

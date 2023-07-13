@@ -4,6 +4,7 @@ pragma solidity 0.8.19;
 
 import "../../interfaces/ITroveManager.sol";
 import "../../interfaces/ISortedTroves.sol";
+import "../../interfaces/IFactory.sol";
 
 /*  Helper contract for grabbing Trove data for the front end. Not part of the core Prisma system. */
 contract MultiTroveGetter {
@@ -16,18 +17,19 @@ contract MultiTroveGetter {
         uint256 snapshotDebt;
     }
 
-    ITroveManager public troveManager;
-    ISortedTroves public sortedTroves;
+    IFactory public immutable factory;
 
-    constructor(ITroveManager _troveManager, ISortedTroves _sortedTroves) {
-        troveManager = _troveManager;
-        sortedTroves = _sortedTroves;
+    constructor(IFactory _factory) {
+        factory = _factory;
     }
 
     function getMultipleSortedTroves(
+        address collateral,
         int _startIdx,
         uint256 _count
     ) external view returns (CombinedTroveData[] memory _troves) {
+        ITroveManager troveManager = ITroveManager(factory.collateralTroveManager(collateral));
+        ISortedTroves sortedTroves = ISortedTroves(troveManager.sortedTroves());
         uint256 startIdx;
         bool descend;
 
@@ -51,14 +53,16 @@ contract MultiTroveGetter {
             }
 
             if (descend) {
-                _troves = _getMultipleSortedTrovesFromHead(startIdx, _count);
+                _troves = _getMultipleSortedTrovesFromHead(troveManager, sortedTroves, startIdx, _count);
             } else {
-                _troves = _getMultipleSortedTrovesFromTail(startIdx, _count);
+                _troves = _getMultipleSortedTrovesFromTail(troveManager, sortedTroves, startIdx, _count);
             }
         }
     }
 
     function _getMultipleSortedTrovesFromHead(
+        ITroveManager troveManager,
+        ISortedTroves sortedTroves,
         uint256 _startIdx,
         uint256 _count
     ) internal view returns (CombinedTroveData[] memory _troves) {
@@ -92,6 +96,8 @@ contract MultiTroveGetter {
     }
 
     function _getMultipleSortedTrovesFromTail(
+        ITroveManager troveManager,
+        ISortedTroves sortedTroves,
         uint256 _startIdx,
         uint256 _count
     ) internal view returns (CombinedTroveData[] memory _troves) {
