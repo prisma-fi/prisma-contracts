@@ -39,7 +39,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     // Tracker for Debt held in the pool. Changes when users deposit/withdraw, and when Trove debt is offset.
     uint256 internal totalDebtTokenDeposits;
 
-    mapping(address => uint256) public deposits; // depositor address -> initial deposit
+    mapping(address => AccountDeposit) public accountDeposits; // depositor address -> initial deposit
     mapping(address => Snapshots) public depositSnapshots; // depositor address -> snapshots struct
 
     // index values are mapped against the values within `collateralTokens`
@@ -94,6 +94,11 @@ contract StabilityPool is PrismaOwnable, SystemStart {
 
     mapping(uint16 => SunsetIndex) _sunsetIndexes;
     Queue queue;
+
+    struct AccountDeposit {
+        uint128 amount;
+        uint128 timestamp; // timestamp of the last deposit
+    }
 
     struct Snapshots {
         uint256 P;
@@ -224,7 +229,12 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         emit StabilityPoolDebtBalanceUpdated(newTotalDebtTokenDeposits);
 
         uint256 newDeposit = compoundedDebtDeposit + _amount;
-        _updateDepositAndSnapshots(msg.sender, newDeposit);
+        accountDeposits[msg.sender] = AccountDeposit({
+            amount: uint128(newDeposit),
+            timestamp: uint128(block.timestamp)
+        });
+
+        _updateSnapshots(msg.sender, newDeposit);
         emit UserDepositChanged(msg.sender, newDeposit);
     }
 
@@ -239,8 +249,10 @@ contract StabilityPool is PrismaOwnable, SystemStart {
      * If _amount > userDeposit, the user withdraws all of their compounded deposit.
      */
     function withdrawFromSP(uint256 _amount) external {
-        uint256 initialDeposit = deposits[msg.sender];
+        uint256 initialDeposit = accountDeposits[msg.sender].amount;
+        uint128 depositTimestamp = accountDeposits[msg.sender].timestamp;
         require(initialDeposit > 0, "StabilityPool: User must have a non-zero deposit");
+        require(depositTimestamp < block.timestamp, "!Deposit and withdraw same block");
 
         _triggerRewardIssuance();
 
@@ -259,7 +271,9 @@ contract StabilityPool is PrismaOwnable, SystemStart {
 
         // Update deposit
         uint256 newDeposit = compoundedDebtDeposit - debtToWithdraw;
-        _updateDepositAndSnapshots(msg.sender, newDeposit);
+        accountDeposits[msg.sender] = AccountDeposit({ amount: uint128(newDeposit), timestamp: depositTimestamp });
+
+        _updateSnapshots(msg.sender, newDeposit);
         emit UserDepositChanged(msg.sender, newDeposit);
     }
 
@@ -480,7 +494,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     function getDepositorCollateralGain(address _depositor) external view returns (uint256[] memory collateralGains) {
         uint80[256] storage depositorGains = collateralGainsByDepositor[_depositor];
         collateralGains = new uint256[](collateralTokens.length);
-        uint256 initialDeposit = deposits[_depositor];
+        uint256 initialDeposit = accountDeposits[_depositor].amount;
 
         uint128 epochSnapshot = depositSnapshots[_depositor].epoch;
         uint128 scaleSnapshot = depositSnapshots[_depositor].scale;
@@ -503,7 +517,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     function _accrueDepositorCollateralGain(address _depositor) private returns (bool hasGains) {
         uint80[256] storage depositorGains = collateralGainsByDepositor[_depositor];
         uint256 collaterals = collateralTokens.length;
-        uint256 initialDeposit = deposits[_depositor];
+        uint256 initialDeposit = accountDeposits[_depositor].amount;
         hasGains = false;
         if (initialDeposit == 0) {
             return hasGains;
@@ -537,7 +551,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
      */
     function claimableReward(address _depositor) external view returns (uint256) {
         uint256 totalDebt = totalDebtTokenDeposits;
-        uint256 initialDeposit = deposits[_depositor];
+        uint256 initialDeposit = accountDeposits[_depositor].amount;
 
         if (totalDebt == 0 || initialDeposit == 0) {
             return 0;
@@ -563,7 +577,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     }
 
     function _claimableReward(address _depositor) private view returns (uint256) {
-        uint256 initialDeposit = deposits[_depositor];
+        uint256 initialDeposit = accountDeposits[_depositor].amount;
         if (initialDeposit == 0) {
             return 0;
         }
@@ -602,7 +616,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
      * where P(0) is the depositor's snapshot of the product P, taken when they last updated their deposit.
      */
     function getCompoundedDebtDeposit(address _depositor) public view returns (uint256) {
-        uint256 initialDeposit = deposits[_depositor];
+        uint256 initialDeposit = accountDeposits[_depositor].amount;
         if (initialDeposit == 0) {
             return 0;
         }
@@ -689,12 +703,9 @@ contract StabilityPool is PrismaOwnable, SystemStart {
 
     // --- Stability Pool Deposit Functionality ---
 
-    function _updateDepositAndSnapshots(address _depositor, uint256 _newValue) internal {
-        deposits[_depositor] = _newValue;
-
+    function _updateSnapshots(address _depositor, uint256 _newValue) internal {
         uint256 length;
         if (_newValue == 0) {
-            delete deposits[_depositor];
             delete depositSnapshots[_depositor];
 
             // TODO do we need to clear depositSums? getDepositorCollateralGain and claimableReward
@@ -750,7 +761,8 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     }
 
     function _claimReward(address account) internal returns (uint256 amount) {
-        uint256 initialDeposit = deposits[account];
+        uint256 initialDeposit = accountDeposits[account].amount;
+        uint128 depositTimestamp = accountDeposits[account].timestamp;
         require(initialDeposit > 0, "StabilityPool: User must have a non-zero deposit");
 
         _triggerRewardIssuance();
@@ -765,7 +777,8 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         if (debtLoss > 0 || hasGains || amount > 0) {
             // Update deposit
             uint256 newDeposit = compoundedDebtDeposit;
-            _updateDepositAndSnapshots(account, newDeposit);
+            accountDeposits[account] = AccountDeposit({ amount: uint128(newDeposit), timestamp: depositTimestamp });
+            _updateSnapshots(account, newDeposit);
         }
         uint256 pending = pendingRewardFor[account];
         if (pending > 0) {
