@@ -993,7 +993,8 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         uint256 _compositeDebt,
         uint256 NICR,
         address _upperHint,
-        address _lowerHint
+        address _lowerHint,
+        bool _isRecoveryMode
     ) external whenNotPaused returns (uint256 stake, uint256 arrayIndex) {
         _requireCallerIsBO();
         require(!sunsetting, "Cannot open while sunsetting");
@@ -1015,7 +1016,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         t.arrayIndex = uint128(arrayIndex);
 
         _updateIntegrals(_borrower, 0, supply);
-        _updateMintVolume(_borrower, _compositeDebt);
+        if (!_isRecoveryMode) _updateMintVolume(_borrower, _compositeDebt);
 
         totalActiveCollateral = totalActiveCollateral + _collateralAmount;
         uint256 _newTotalDebt = supply + _compositeDebt;
@@ -1024,14 +1025,15 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     }
 
     function updateTroveFromAdjustment(
-        address _borrower,
-        uint256 _collChange,
-        bool _isCollIncrease,
-        uint256 _debtChange,
+        bool _isRecoveryMode,
         bool _isDebtIncrease,
+        uint256 _debtChange,
         uint256 _netDebtChange,
+        bool _isCollIncrease,
+        uint256 _collChange,
         address _upperHint,
         address _lowerHint,
+        address _borrower,
         address _receiver
     ) external returns (uint256, uint256, uint256) {
         _requireCallerIsBO();
@@ -1042,9 +1044,21 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
         Trove storage t = Troves[_borrower];
         require(t.status == Status.active, "Trove closed or does not exist");
-        uint256 newColl = t.coll;
-        uint256 newDebt = t.debt;
 
+        uint256 newDebt = t.debt;
+        if (_debtChange > 0) {
+            if (_isDebtIncrease) {
+                newDebt = newDebt + _netDebtChange;
+                if (!_isRecoveryMode) _updateMintVolume(_borrower, _netDebtChange);
+                _increaseDebt(_receiver, _netDebtChange, _debtChange);
+            } else {
+                newDebt = newDebt - _netDebtChange;
+                _decreaseDebt(_receiver, _debtChange);
+            }
+            t.debt = newDebt;
+        }
+
+        uint256 newColl = t.coll;
         if (_collChange > 0) {
             if (_isCollIncrease) {
                 newColl = newColl + _collChange;
@@ -1057,21 +1071,8 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
             t.coll = newColl;
         }
 
-        if (_debtChange > 0) {
-            if (_isDebtIncrease) {
-                newDebt = newDebt + _netDebtChange;
-                _updateMintVolume(_borrower, _netDebtChange);
-                _increaseDebt(_receiver, _netDebtChange, _debtChange);
-            } else {
-                newDebt = newDebt - _netDebtChange;
-                _decreaseDebt(_receiver, _debtChange);
-            }
-            t.debt = newDebt;
-        }
-
-        address borrower = _borrower; // would you believe this avoids stack-too-deep?
         uint256 newNICR = PrismaMath._computeNominalCR(newColl, newDebt);
-        sortedTroves.reInsert(borrower, newNICR, _upperHint, _lowerHint);
+        sortedTroves.reInsert(_borrower, newNICR, _upperHint, _lowerHint);
 
         return (newColl, newDebt, _updateStakeAndTotalStakes(t));
     }

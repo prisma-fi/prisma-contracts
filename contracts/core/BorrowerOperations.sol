@@ -49,6 +49,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         uint256 stake;
         bool isDebtIncrease;
         uint256 debtChange;
+        address account;
     }
 
     struct LocalVariables_openTrove {
@@ -214,7 +215,8 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
             vars.compositeDebt,
             vars.NICR,
             _upperHint,
-            _lowerHint
+            _lowerHint,
+            isRecoveryMode
         );
         emit TroveCreated(account, vars.arrayIndex);
 
@@ -331,6 +333,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         vars.netDebtChange = _debtChange;
         vars.debtChange = _debtChange;
         vars.isDebtIncrease = _isDebtIncrease;
+        vars.account = account;
 
         if (_isDebtIncrease) {
             require(_debtChange > 0, "BorrowerOps: Debt increase requires non-zero debtChange");
@@ -360,18 +363,19 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         if (vars.isCollIncrease) collateralToken.transferFrom(msg.sender, address(troveManager), vars.collChange);
 
         (vars.newColl, vars.newDebt, vars.stake) = troveManager.updateTroveFromAdjustment(
-            account,
-            vars.collChange,
-            vars.isCollIncrease,
-            vars.debtChange,
+            isRecoveryMode,
             _isDebtIncrease,
+            vars.debtChange,
             vars.netDebtChange,
+            vars.isCollIncrease,
+            vars.collChange,
             _upperHint,
             _lowerHint,
+            vars.account,
             msg.sender
         );
 
-        emit TroveUpdated(account, vars.newDebt, vars.newColl, vars.stake, BorrowerOperation.adjustTrove);
+        emit TroveUpdated(vars.account, vars.newDebt, vars.newColl, vars.stake, BorrowerOperation.adjustTrove);
     }
 
     function closeTrove(IERC20 collateralToken, address account) external callerOrDelegated(account) {

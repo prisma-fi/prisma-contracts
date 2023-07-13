@@ -50,7 +50,8 @@ interface ITroveManager {
         uint256 _compositeDebt,
         uint NICR,
         address _upperHint,
-        address _lowerHint
+        address _lowerHint,
+        bool _isRecoveryMode
     ) external returns (uint stake, uint arrayIndex);
 
     function closeTrove(address _borrower, uint collAmount, uint debtAmount) external;
@@ -80,14 +81,15 @@ interface ITroveManager {
     function getTroveCollAndDebt(address _borrower) external view returns (uint, uint);
 
     function updateTroveFromAdjustment(
-        address _borrower,
-        uint _collChange,
-        bool _isCollIncrease,
-        uint _debtChange,
+        bool _isRecoveryMode,
         bool _isDebtIncrease,
-        uint _netDebtChange,
+        uint256 _debtChange,
+        uint256 _netDebtChange,
+        bool _isCollIncrease,
+        uint256 _collChange,
         address _upperHint,
         address _lowerHint,
+        address _borrower,
         address _receiver
     ) external returns (uint, uint, uint);
 
