@@ -107,7 +107,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
      */
     uint256 public L_collateral;
     uint256 public L_debt;
-    uint256 public lastDefaultInterestUpdate;
 
     // Error trackers for the trove redistribution calculation
     uint256 public lastCollateralError_Redistribution;
@@ -260,7 +259,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         sunsetting = false;
         activeInterestIndex = INTEREST_PRECISION;
         lastActiveIndexUpdate = block.timestamp;
-        lastDefaultInterestUpdate = block.timestamp;
     }
 
     function notifyRegisteredId(uint256[] calldata _assignedIds) external returns (bool) {
@@ -306,7 +304,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         require(msg.sender == address(PRISMA_CORE), "Not prisma core");
         sunsetting = true;
         _accrueActiveInterests();
-        _redistributeDebtAndColl(0, 0); //Accrue defaults interests
         interestRate = SUNSETTING_INTEREST_RATE;
         // accrual function doesn't update timestamp if interest was 0
         lastActiveIndexUpdate = block.timestamp;
@@ -357,7 +354,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
             _accrueActiveInterests();
             // accrual function doesn't update timestamp if interest was 0
             lastActiveIndexUpdate = block.timestamp;
-            _redistributeDebtAndColl(0, 0); //Accrue defaults interests
             interestRate = newInterestRate;
         }
     }
@@ -443,20 +439,12 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
     function getEntireSystemDebt() public view returns (uint256) {
         uint256 currentActiveDebt = totalActiveDebt;
-        uint256 currentDefaultedDebt = defaultedDebt;
         (, uint256 interestFactor) = _calculateInterestIndex();
         if (interestFactor > 0) {
             uint256 activeInterests = Math.mulDiv(currentActiveDebt, interestFactor, INTEREST_PRECISION);
             currentActiveDebt = currentActiveDebt + activeInterests;
         }
-        uint256 lastIndexUpdateCached = lastDefaultInterestUpdate;
-        if (lastIndexUpdateCached < block.timestamp) {
-            uint256 deltaT = block.timestamp - lastIndexUpdateCached;
-            interestFactor = deltaT * interestRate;
-            uint256 accruedInterest = Math.mulDiv(currentDefaultedDebt, interestFactor, INTEREST_PRECISION);
-            currentDefaultedDebt += accruedInterest;
-        }
-        return currentActiveDebt + currentDefaultedDebt;
+        return currentActiveDebt + defaultedDebt;
     }
 
     function getEntireSystemBalances() external returns (uint256, uint256, uint256) {
@@ -1100,13 +1088,11 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         if (TroveOwners.length == 0) {
             activeInterestIndex = INTEREST_PRECISION;
             lastActiveIndexUpdate = block.timestamp;
-            lastDefaultInterestUpdate = block.timestamp;
             totalStakes = 0;
             totalStakesSnapshot = 0;
             totalCollateralSnapshot = 0;
             L_collateral = 0;
             L_debt = 0;
-            lastDefaultInterestUpdate = 0;
             lastCollateralError_Redistribution = 0;
             lastDebtError_Redistribution = 0;
             totalActiveCollateral = 0;
@@ -1203,7 +1189,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
             }
 
             if (rewardSnapshots[_borrower].collateral < L_collateral) {
-                _redistributeDebtAndColl(0, 0); //Accrue defaults interests
                 // Compute pending rewards
                 (uint256 pendingCollateralReward, uint256 pendingDebtReward) = getPendingCollAndDebtRewards(_borrower);
 
@@ -1325,19 +1310,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     }
 
     function _redistributeDebtAndColl(uint256 _debt, uint256 _coll) internal {
-        uint256 debtWithInterests = _debt;
-        uint256 lastIndexUpdateCached = lastDefaultInterestUpdate;
-        // We accrued interest matured by defaulted debt while not distributed,
-        // interests are applied pro rata to troves
-        if (lastIndexUpdateCached < block.timestamp) {
-            uint256 deltaT = block.timestamp - lastIndexUpdateCached;
-            uint256 interestFactor = deltaT * interestRate;
-            uint256 accruedInterest = Math.mulDiv(defaultedDebt, interestFactor, INTEREST_PRECISION);
-            interestPayable += accruedInterest;
-            debtWithInterests += accruedInterest;
-            lastDefaultInterestUpdate = block.timestamp;
-        }
-        if (debtWithInterests == 0) {
+        if (_debt == 0) {
             return;
         }
         /*
@@ -1352,7 +1325,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
          * 5) Note: static analysis tools complain about this "division before multiplication", however, it is intended.
          */
         uint256 collateralNumerator = (_coll * DECIMAL_PRECISION) + lastCollateralError_Redistribution;
-        uint256 debtNumerator = (debtWithInterests * DECIMAL_PRECISION) + lastDebtError_Redistribution;
+        uint256 debtNumerator = (_debt * DECIMAL_PRECISION) + lastDebtError_Redistribution;
 
         // Get the per-unit-staked terms
         uint256 collateralRewardPerUnitStaked = collateralNumerator / totalStakes;
@@ -1367,12 +1340,10 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
         emit LTermsUpdated(L_collateral, L_debt);
 
-        totalActiveDebt -= _debt; //Interest are generated in the default balance
-        defaultedDebt += debtWithInterests;
-        if (_coll > 0) {
-            defaultedCollateral += _coll;
-            totalActiveCollateral -= _coll;
-        }
+        totalActiveDebt -= _debt;
+        defaultedDebt += _debt;
+        defaultedCollateral += _coll;
+        totalActiveCollateral -= _coll;
     }
 
     // --- Trove property setters ---
@@ -1413,7 +1384,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
     function _updateBalances() private {
         _updateRewardIntegral(totalActiveDebt);
-        _redistributeDebtAndColl(0, 0); //Accrue defaults interests
         _accrueActiveInterests();
     }
 
