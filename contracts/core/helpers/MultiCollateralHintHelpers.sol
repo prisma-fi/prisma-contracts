@@ -56,6 +56,7 @@ contract MultiCollateralHintHelpers is PrismaBase {
 
         uint256 remainingDebt = _debtAmount;
         address currentTroveuser = sortedTrovesCached.getLast();
+        uint256 MCR = troveManager.MCR();
 
         while (currentTroveuser != address(0) && troveManager.getCurrentICR(currentTroveuser, _price) < MCR) {
             currentTroveuser = sortedTrovesCached.getPrev(currentTroveuser);

@@ -54,6 +54,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         uint256 stake;
         uint256 debtChange;
         address account;
+        uint256 MCR;
     }
 
     struct LocalVariables_openTrove {
@@ -205,7 +206,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         if (isRecoveryMode) {
             _requireICRisAboveCCR(vars.ICR);
         } else {
-            _requireICRisAboveMCR(vars.ICR);
+            _requireICRisAboveMCR(vars.ICR, troveManager.MCR());
             uint256 newTCR = _getNewTCRFromTroveChange(
                 vars.totalPricedCollateral,
                 vars.totalDebt,
@@ -345,6 +346,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         vars.netDebtChange = _debtChange;
         vars.debtChange = _debtChange;
         vars.account = account;
+        vars.MCR = troveManager.MCR();
 
         if (_isDebtIncrease) {
             require(_debtChange > 0, "BorrowerOps: Debt increase requires non-zero debtChange");
@@ -489,7 +491,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
             }
         } else {
             // if Normal Mode
-            _requireICRisAboveMCR(newICR);
+            _requireICRisAboveMCR(newICR, _vars.MCR);
             uint256 newTCR = _getNewTCRFromTroveChange(
                 totalPricedCollateral,
                 totalDebt,
@@ -502,7 +504,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         }
     }
 
-    function _requireICRisAboveMCR(uint256 _newICR) internal pure {
+    function _requireICRisAboveMCR(uint256 _newICR, uint256 MCR) internal pure {
         require(_newICR >= MCR, "BorrowerOps: An operation that would result in ICR < MCR is not permitted");
     }
 

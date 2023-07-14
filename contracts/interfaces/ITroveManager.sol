@@ -118,7 +118,8 @@ interface ITroveManager {
         uint _borrowingFeeFloor,
         uint _maxBorrowingFee,
         uint _interestRateInBPS,
-        uint _maxSystemDebt
+        uint _maxSystemDebt,
+        uint _MCR
     ) external;
 
     function startCollateralSunset() external;
@@ -165,4 +166,6 @@ interface ITroveManager {
         );
 
     function rewardSnapshots(address) external view returns (uint256 coll, uint256 debt);
+
+    function MCR() external view returns (uint256);
 }

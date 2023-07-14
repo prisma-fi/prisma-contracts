@@ -45,6 +45,8 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     ISortedTroves public sortedTroves;
 
     EmissionId public emissionId;
+    // Minimum collateral ratio for individual troves
+    uint256 public MCR;
 
     uint256 constant SECONDS_IN_ONE_MINUTE = 60;
     uint256 constant INTEREST_PRECISION = 1e27;
@@ -325,9 +327,11 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         uint256 _borrowingFeeFloor,
         uint256 _maxBorrowingFee,
         uint256 _interestRateInBPS,
-        uint256 _maxSystemDebt
+        uint256 _maxSystemDebt,
+        uint256 _MCR
     ) public {
         require(!sunsetting, "Cannot change after sunset");
+        require(_MCR <= CCR && _MCR >= 1100000000000000000, "MCR cannot be > CCR or < 110%");
         if (minuteDecayFactor != 0) {
             require(msg.sender == owner(), "Only owner");
         }
@@ -356,6 +360,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
             lastActiveIndexUpdate = block.timestamp;
             interestRate = newInterestRate;
         }
+        MCR = _MCR;
     }
 
     function collectInterests() external {
@@ -661,7 +666,8 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         );
         require(block.timestamp >= systemDeploymentTime + BOOTSTRAP_PERIOD, "BOOTSTRAP_PERIOD");
         totals.price = fetchPrice();
-        require(getTCR(totals.price) >= MCR, "Cannot redeem when TCR < MCR");
+        uint256 _MCR = MCR;
+        require(getTCR(totals.price) >= _MCR, "Cannot redeem when TCR < MCR");
         require(_debtAmount > 0, "Amount must be greater than zero");
         require(debtToken.balanceOf(msg.sender) >= _debtAmount, "Insufficient balance");
         _updateBalances();
@@ -670,12 +676,12 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         totals.remainingDebt = _debtAmount;
         address currentBorrower;
 
-        if (_isValidFirstRedemptionHint(_sortedTrovesCached, _firstRedemptionHint, totals.price)) {
+        if (_isValidFirstRedemptionHint(_sortedTrovesCached, _firstRedemptionHint, totals.price, _MCR)) {
             currentBorrower = _firstRedemptionHint;
         } else {
             currentBorrower = _sortedTrovesCached.getLast();
             // Find the first trove with ICR >= MCR
-            while (currentBorrower != address(0) && getCurrentICR(currentBorrower, totals.price) < MCR) {
+            while (currentBorrower != address(0) && getCurrentICR(currentBorrower, totals.price) < _MCR) {
                 currentBorrower = _sortedTrovesCached.getPrev(currentBorrower);
             }
         }
@@ -815,18 +821,19 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     function _isValidFirstRedemptionHint(
         ISortedTroves _sortedTroves,
         address _firstRedemptionHint,
-        uint256 _price
+        uint256 _price,
+        uint256 _MCR
     ) internal view returns (bool) {
         if (
             _firstRedemptionHint == address(0) ||
             !_sortedTroves.contains(_firstRedemptionHint) ||
-            getCurrentICR(_firstRedemptionHint, _price) < MCR
+            getCurrentICR(_firstRedemptionHint, _price) < _MCR
         ) {
             return false;
         }
 
         address nextTrove = _sortedTroves.getNext(_firstRedemptionHint);
-        return nextTrove == address(0) || getCurrentICR(nextTrove, _price) < MCR;
+        return nextTrove == address(0) || getCurrentICR(nextTrove, _price) < _MCR;
     }
 
     /**

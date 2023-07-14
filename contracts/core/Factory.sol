@@ -39,6 +39,7 @@ contract Factory is PrismaOwnable {
         uint256 maxBorrowingFee;
         uint256 interestRate;
         uint256 maxDebt;
+        uint256 MCR;
     }
 
     error CollateralAlreadyDeployed(address collateral);
@@ -107,7 +108,8 @@ contract Factory is PrismaOwnable {
             params.borrowingFeeFloor,
             params.maxBorrowingFee,
             params.interestRate,
-            params.maxDebt
+            params.maxDebt,
+            params.MCR
         );
 
         emit NewDeployment(collateral, priceFeed, troveManager, sortedTroves);
