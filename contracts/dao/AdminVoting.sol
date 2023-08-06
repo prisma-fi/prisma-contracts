@@ -37,7 +37,8 @@ contract AdminVoting is DelegatedOps, SystemStart {
     }
 
     uint256 public constant VOTING_PERIOD = 1 weeks;
-    uint256 public constant MIN_TIME_TO_EXECUTION = 86400;
+    uint256 public constant MIN_TIME_TO_EXECUTION = 1 days;
+    uint256 public constant MAX_TIME_TO_EXECUTION = 3 weeks;
 
     ITokenLocker public immutable tokenLocker;
     IPrismaCore public immutable prismaCore;
@@ -209,6 +210,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         Proposal memory proposal = proposalData[id];
         require(proposal.currentWeight >= proposal.requiredWeight, "Not passed");
         require(proposal.createdAt + MIN_TIME_TO_EXECUTION < block.timestamp, "MIN_TIME_TO_EXECUTION");
+        require(proposal.createdAt + MAX_TIME_TO_EXECUTION > block.timestamp, "MAX_TIME_TO_EXECUTION");
         require(!proposal.processed, "Already processed");
         proposalData[id].processed = true;
 
