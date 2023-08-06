@@ -108,8 +108,6 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         emissionSchedule = _emissionSchedule;
         boostCalculator = _boostCalculator;
 
-        _token.approve(address(_locker), type(uint256).max);
-
         // ensure the stability pool is registered with receiver ID 0
         _voter.registerNewReceiver();
         idToReceiver[0] = _stabilityPool;
