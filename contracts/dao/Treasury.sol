@@ -88,6 +88,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
     event UnallocatedSupplyIncreased(uint256 increasedAmount, uint256 unallocatedTotal);
     event IncreasedAllocation(address indexed receiver, uint256 increasedAmount);
     event EmissionScheduleSet(address emissionScheduler);
+    event BoostCalculatorSet(address boostCalculator);
     event BoostDelegationSet(address indexed boostDelegate, bool isEnabled, uint256 feePct, address callback);
 
     constructor(
@@ -170,6 +171,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
 
     function setBoostCalculator(IBoostCalculator _boostCalculator) external onlyOwner returns (bool) {
         boostCalculator = _boostCalculator;
+        emit BoostCalculatorSet(address(_boostCalculator));
 
         return true;
     }
