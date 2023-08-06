@@ -34,6 +34,9 @@ interface IAragon {
     @title Prisma Curve Proxy
     @notice Locks CRV in Curve's `VotingEscrow` and interacts with various Curve
             contracts that require / provide benefit from the locked CRV position.
+    @dev This contract cannot operate without approval in Curve's VotingEscrow
+         smart wallet whitelist. See the Curve documentation for more info:
+         https://docs.curve.fi/curve_dao/VotingEscrow/#smart-wallet-whitelist
  */
 contract CurveProxy is PrismaOwnable {
     using Address for address;
