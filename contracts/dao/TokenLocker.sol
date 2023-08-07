@@ -424,6 +424,9 @@ contract TokenLocker is SystemStart {
             accountData.frozen = uint32(frozen + _amount);
             _weeks = MAX_LOCK_WEEKS;
         } else {
+            // disallow a 1 week lock in the final 3 days of the week
+            if (_weeks == 1 && block.timestamp % 1 weeks > 4 days) _weeks = 2;
+
             accountData.locked = uint32(accountData.locked + _amount);
             totalDecayRate = uint32(totalDecayRate + _amount);
 
@@ -539,6 +542,10 @@ contract TokenLocker is SystemStart {
             require(amount > 0, "Amount must be nonzero");
             require(week > 0, "Min 1 week");
             require(week <= MAX_LOCK_WEEKS, "Exceeds MAX_LOCK_WEEKS");
+
+            // disallow a 1 week lock in the final 3 days of the week
+            if (week == 1 && block.timestamp % 1 weeks > 4 days) week = 2;
+
             increasedAmount += amount;
             increasedWeight += amount * week;
 
