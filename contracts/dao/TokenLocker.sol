@@ -248,10 +248,10 @@ contract TokenLocker is SystemStart {
     /**
         @notice Get withdrawal and penalty amounts when withdrawing locked tokens
         @param account Account that will withdraw locked tokens
-        @param amountToWithdraw Desired amount of tokens with withdraw
+        @param amountToWithdraw Desired withdrawal amount, divided by `lockToTokenRatio`
         @return amountWithdrawn Actual amount withdrawn. If `amountToWithdraw` exceeds the
-                                max possible withdrawal, this return value is be the max
-                                amount available after paying the penalty.
+                                max possible withdrawal, the return value is the max
+                                amount received after paying the penalty.
         @return penaltyAmountPaid The amount paid in penalty to perform this withdrawal
      */
     function getWithdrawWithPenaltyAmounts(
@@ -260,12 +260,14 @@ contract TokenLocker is SystemStart {
     ) external view returns (uint256 amountWithdrawn, uint256 penaltyAmountPaid) {
         AccountData storage accountData = accountLockData[account];
         uint32[65535] storage unlocks = accountWeeklyUnlocks[account];
+        if (amountToWithdraw != type(uint256).max) amountToWithdraw *= lockToTokenRatio;
 
         // first we apply the unlocked balance without penalty
-        uint256 unlocked = accountData.unlocked;
+        uint256 unlocked = accountData.unlocked * lockToTokenRatio;
         if (unlocked >= amountToWithdraw) {
             return (amountToWithdraw, 0);
         }
+
         uint256 remaining = amountToWithdraw - unlocked;
         uint256 penaltyTotal;
 
@@ -283,7 +285,7 @@ contract TokenLocker is SystemStart {
             }
 
             if ((bitfield >> (accountWeek % 256)) & uint256(1) == 1) {
-                uint32 lockAmount = unlocks[accountWeek];
+                uint256 lockAmount = unlocks[accountWeek] * lockToTokenRatio;
 
                 uint256 penaltyOnAmount = 0;
                 if (accountWeek > systemWeek) {
@@ -298,6 +300,8 @@ contract TokenLocker is SystemStart {
                         (remaining * MAX_LOCK_WEEKS) /
                         (MAX_LOCK_WEEKS - (weeksToUnlock - offset)) -
                         remaining;
+                    uint256 dust = ((penaltyOnAmount + remaining) % lockToTokenRatio);
+                    if (dust > 0) penaltyOnAmount += lockToTokenRatio - dust;
                     penaltyTotal += penaltyOnAmount;
                     remaining = 0;
                 } else {
@@ -756,7 +760,7 @@ contract TokenLocker is SystemStart {
 
              [total amount] * [weeks to unlock] / MAX_LOCK_WEEKS = [penalty amount]
 
-        @param amountToWithdraw The amount of tokens to withdraw from active locks. This
+        @param amountToWithdraw Amount to withdraw, divided by `lockToTokenRatio`. This
                                 is the same number of tokens that will be received; the
                                 penalty amount is taken on top of this. Reverts if the
                                 caller's locked balances are insufficient to cover both
@@ -770,12 +774,13 @@ contract TokenLocker is SystemStart {
         AccountData storage accountData = accountLockData[msg.sender];
         uint32[65535] storage unlocks = accountWeeklyUnlocks[msg.sender];
         uint256 weight = _weeklyWeightWrite(msg.sender);
+        if (amountToWithdraw != type(uint256).max) amountToWithdraw *= lockToTokenRatio;
 
         // start by withdrawing unlocked balance without penalty
-        uint256 unlocked = accountData.unlocked;
+        uint256 unlocked = accountData.unlocked * lockToTokenRatio;
         if (unlocked >= amountToWithdraw) {
-            accountData.unlocked = uint32(unlocked - amountToWithdraw);
-            lockToken.transfer(msg.sender, amountToWithdraw * lockToTokenRatio);
+            accountData.unlocked = uint32((unlocked - amountToWithdraw) / lockToTokenRatio);
+            lockToken.transfer(msg.sender, amountToWithdraw);
             return amountToWithdraw;
         }
 
@@ -802,26 +807,29 @@ contract TokenLocker is SystemStart {
             }
 
             if ((bitfield >> (systemWeek % 256)) & uint256(1) == 1) {
-                uint32 lockAmount = unlocks[systemWeek];
+                uint256 lockAmount = unlocks[systemWeek] * lockToTokenRatio;
                 uint256 penaltyOnAmount = (lockAmount * weeksToUnlock) / MAX_LOCK_WEEKS;
 
                 if (lockAmount - penaltyOnAmount > remaining) {
                     // after penalty, locked amount exceeds remaining required balance
                     // we can complete the withdrawal using only a portion of this lock
                     penaltyOnAmount = (remaining * MAX_LOCK_WEEKS) / (MAX_LOCK_WEEKS - weeksToUnlock) - remaining;
+                    uint256 dust = ((penaltyOnAmount + remaining) % lockToTokenRatio);
+                    if (dust > 0) penaltyOnAmount += lockToTokenRatio - dust;
                     penaltyTotal += penaltyOnAmount;
-                    decreasedWeight += (penaltyOnAmount + remaining) * weeksToUnlock;
-                    unlocks[systemWeek] -= uint32(penaltyOnAmount + remaining);
-                    totalWeeklyUnlocks[systemWeek] -= uint32(penaltyOnAmount + remaining);
+                    uint256 lockReduceAmount = (penaltyOnAmount + remaining) / lockToTokenRatio;
+                    decreasedWeight += lockReduceAmount * weeksToUnlock;
+                    unlocks[systemWeek] -= uint32(lockReduceAmount);
+                    totalWeeklyUnlocks[systemWeek] -= uint32(lockReduceAmount);
                     remaining = 0;
                 } else {
                     // after penalty, locked amount does not exceed remaining required balance
                     // the entire lock must be used in the withdrawal
                     penaltyTotal += penaltyOnAmount;
-                    decreasedWeight += lockAmount * weeksToUnlock;
+                    decreasedWeight += (lockAmount / lockToTokenRatio) * weeksToUnlock;
                     bitfield = bitfield & ~(uint256(1) << (systemWeek % 256));
                     unlocks[systemWeek] = 0;
-                    totalWeeklyUnlocks[systemWeek] -= lockAmount;
+                    totalWeeklyUnlocks[systemWeek] -= uint32(lockAmount / lockToTokenRatio);
                     remaining -= lockAmount - penaltyOnAmount;
                 }
 
@@ -839,14 +847,14 @@ contract TokenLocker is SystemStart {
             require(remaining == 0, "Insufficient balance after fees");
         }
 
-        accountData.locked -= uint32(amountToWithdraw + penaltyTotal - unlocked);
-        totalDecayRate -= uint32(amountToWithdraw + penaltyTotal - unlocked);
+        accountData.locked -= uint32((amountToWithdraw + penaltyTotal - unlocked) / lockToTokenRatio);
+        totalDecayRate -= uint32((amountToWithdraw + penaltyTotal - unlocked) / lockToTokenRatio);
         systemWeek = getWeek();
         accountWeeklyWeights[msg.sender][systemWeek] = uint40(weight - decreasedWeight);
         totalWeeklyWeights[systemWeek] = uint40(getTotalWeightWrite() - decreasedWeight);
 
-        lockToken.transfer(msg.sender, amountToWithdraw * lockToTokenRatio);
-        lockToken.transfer(prismaCore.feeReceiver(), penaltyTotal * lockToTokenRatio);
+        lockToken.transfer(msg.sender, amountToWithdraw);
+        lockToken.transfer(prismaCore.feeReceiver(), penaltyTotal);
         emit LocksWithdrawn(msg.sender, amountToWithdraw, penaltyTotal);
 
         return amountToWithdraw;
