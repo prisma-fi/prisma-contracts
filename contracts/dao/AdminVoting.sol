@@ -144,17 +144,11 @@ contract AdminVoting is DelegatedOps, SystemStart {
         uint256 accountWeight = tokenLocker.getAccountWeightAt(account, week);
         require(accountWeight >= minCreateProposalWeight, "Not enough weight to propose");
 
-        uint256 _passingPct = passingPct;
-        if (payload.length == 1 && payload[0].target == address(prismaCore)) {
-            // if the only action is `prismaCore.setGuardian()`, use
-            // `SET_GUARDIAN_PASSING_PCT` instead of `passingPct`
-            bytes memory data = payload[0].data;
-            bytes4 sig;
-            assembly {
-                sig := mload(add(data, 0x20))
-            }
-            if (sig == IPrismaCore.setGuardian.selector) _passingPct = SET_GUARDIAN_PASSING_PCT;
-        }
+        // if the only action is `prismaCore.setGuardian()`, use
+        // `SET_GUARDIAN_PASSING_PCT` instead of `passingPct`
+        uint256 _passingPct;
+        if (_isSetGuardianPayload(payload.length, payload[0])) _passingPct = SET_GUARDIAN_PASSING_PCT;
+        else _passingPct = passingPct;
 
         uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
         uint40 requiredWeight = uint40((totalWeight * _passingPct) / 100);
@@ -225,18 +219,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         require(id < proposalData.length, "Invalid ID");
 
         Action[] storage payload = proposalPayloads[id];
-        if (payload.length == 1) {
-            Action memory firstAction = payload[0];
-            if (firstAction.target == address(prismaCore)) {
-                bytes memory data = firstAction.data;
-                // Extract the call sig from payload data
-                bytes4 sig;
-                assembly {
-                    sig := mload(add(data, 0x20))
-                }
-                require(sig != IPrismaCore.setGuardian.selector, "Guardian replacement not cancellable");
-            }
-        }
+        require(!_isSetGuardianPayload(payload.length, payload[0]), "Guardian replacement not cancellable");
         proposalData[id].processed = true;
         emit ProposalCancelled(id);
     }
@@ -301,5 +284,18 @@ contract AdminVoting is DelegatedOps, SystemStart {
      */
     function acceptTransferOwnership() external {
         prismaCore.acceptTransferOwnership();
+    }
+
+    function _isSetGuardianPayload(uint256 payloadLength, Action memory action) internal view returns (bool) {
+        if (payloadLength == 1 && action.target == address(prismaCore)) {
+            bytes memory data = action.data;
+            // Extract the call sig from payload data
+            bytes4 sig;
+            assembly {
+                sig := mload(add(data, 0x20))
+            }
+            return sig == IPrismaCore.setGuardian.selector;
+        }
+        return false;
     }
 }
