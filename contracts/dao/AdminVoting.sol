@@ -46,6 +46,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
     uint256 public constant VOTING_PERIOD = 1 weeks;
     uint256 public constant MIN_TIME_TO_EXECUTION = 1 days;
     uint256 public constant MAX_TIME_TO_EXECUTION = 3 weeks;
+    uint256 public constant MIN_TIME_BETWEEN_PROPOSALS = 1 weeks;
 
     ITokenLocker public immutable tokenLocker;
     IPrismaCore public immutable prismaCore;
@@ -55,6 +56,8 @@ contract AdminVoting is DelegatedOps, SystemStart {
 
     // account -> ID -> amount of weight voted in favor
     mapping(address => mapping(uint256 => uint256)) public accountVoteWeights;
+
+    mapping(address account => uint256 timestamp) public latestProposalTimestamp;
 
     // absolute amount of weight required to create a new proposal
     uint256 public minCreateProposalWeight;
@@ -127,6 +130,11 @@ contract AdminVoting is DelegatedOps, SystemStart {
     function createNewProposal(address account, Action[] calldata payload) external callerOrDelegated(account) {
         require(payload.length > 0, "Empty payload");
 
+        require(
+            latestProposalTimestamp[account] + MIN_TIME_BETWEEN_PROPOSALS < block.timestamp,
+            "MIN_TIME_BETWEEN_PROPOSALS"
+        );
+
         // week is set at -1 to the active week so that weights are finalized
         uint256 week = getWeek();
         require(week > 0, "No proposals in first week");
@@ -151,6 +159,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         for (uint256 i = 0; i < payload.length; i++) {
             proposalPayloads[idx].push(payload[i]);
         }
+        latestProposalTimestamp[account] = block.timestamp;
         emit ProposalCreated(account, payload, week, requiredWeight);
     }
 
