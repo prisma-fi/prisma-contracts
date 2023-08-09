@@ -47,6 +47,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
     uint256 public constant MIN_TIME_TO_EXECUTION = 1 days;
     uint256 public constant MAX_TIME_TO_EXECUTION = 3 weeks;
     uint256 public constant MIN_TIME_BETWEEN_PROPOSALS = 1 weeks;
+    uint256 public constant SET_GUARDIAN_PASSING_PCT = 51;
 
     ITokenLocker public immutable tokenLocker;
     IPrismaCore public immutable prismaCore;
@@ -142,8 +143,21 @@ contract AdminVoting is DelegatedOps, SystemStart {
 
         uint256 accountWeight = tokenLocker.getAccountWeightAt(account, week);
         require(accountWeight >= minCreateProposalWeight, "Not enough weight to propose");
+
+        uint256 _passingPct = passingPct;
+        if (payload.length == 1 && payload[0].target == address(prismaCore)) {
+            // if the only action is `prismaCore.setGuardian()`, use
+            // `SET_GUARDIAN_PASSING_PCT` instead of `passingPct`
+            bytes memory data = payload[0].data;
+            bytes4 sig;
+            assembly {
+                sig := mload(add(data, 0x20))
+            }
+            if (sig == IPrismaCore.setGuardian.selector) _passingPct = SET_GUARDIAN_PASSING_PCT;
+        }
+
         uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
-        uint40 requiredWeight = uint40((totalWeight * passingPct) / 100);
+        uint40 requiredWeight = uint40((totalWeight * _passingPct) / 100);
         uint256 idx = proposalData.length;
         proposalData.push(
             Proposal({
