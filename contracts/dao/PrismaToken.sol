@@ -33,18 +33,15 @@ contract PrismaToken is OFT, IERC2612 {
     bytes32 private immutable _HASHED_VERSION;
 
     address public immutable locker;
-    uint256 public immutable maxTotalSupply;
+    address public immutable vault;
+
+    uint256 public maxTotalSupply;
 
     mapping(address => uint256) private _nonces;
 
     // --- Functions ---
 
-    constructor(
-        address _treasury,
-        address _layerZeroEndpoint,
-        address _locker,
-        uint256 _totalSupply
-    ) OFT(_NAME, _SYMBOL, _layerZeroEndpoint) {
+    constructor(address _vault, address _layerZeroEndpoint, address _locker) OFT(_NAME, _SYMBOL, _layerZeroEndpoint) {
         bytes32 hashedName = keccak256(bytes(_NAME));
         bytes32 hashedVersion = keccak256(bytes(version));
 
@@ -53,9 +50,18 @@ contract PrismaToken is OFT, IERC2612 {
         _CACHED_CHAIN_ID = block.chainid;
         _CACHED_DOMAIN_SEPARATOR = _buildDomainSeparator(_TYPE_HASH, hashedName, hashedVersion);
 
-        _mint(_treasury, _totalSupply);
-        maxTotalSupply = _totalSupply;
         locker = _locker;
+        vault = _vault;
+    }
+
+    function mintToVault(uint256 _totalSupply) external returns (bool) {
+        require(msg.sender == vault);
+        require(maxTotalSupply == 0);
+
+        _mint(vault, _totalSupply);
+        maxTotalSupply = _totalSupply;
+
+        return true;
     }
 
     // --- EIP 2612 functionality ---

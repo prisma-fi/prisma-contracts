@@ -2,9 +2,6 @@
 
 pragma solidity 0.8.19;
 
-import "../interfaces/ITroveManager.sol";
-import "../interfaces/IStabilityPool.sol";
-
 /**
     @title Prisma Core
     @notice Single source of truth for system-wide values and contract ownership.
@@ -14,7 +11,6 @@ import "../interfaces/IStabilityPool.sol";
             using `PrismaOwnable`.
  */
 contract PrismaCore {
-    IStabilityPool public immutable stabilityPool;
     address public feeReceiver;
     address public priceFeed;
 
@@ -52,14 +48,15 @@ contract PrismaCore {
 
     event Unpaused();
 
-    event CollateralSunsetStarted(address collateral);
-
-    constructor(address _owner, address _guardian, IStabilityPool _stabilityPool) {
+    constructor(address _owner, address _guardian, address _priceFeed, address _feeReceiver) {
         owner = _owner;
         startTime = (block.timestamp / 1 weeks) * 1 weeks;
-        stabilityPool = _stabilityPool;
         guardian = _guardian;
+        priceFeed = _priceFeed;
+        feeReceiver = _feeReceiver;
         emit GuardianSet(_guardian);
+        emit PriceFeedSet(_priceFeed);
+        emit FeeReceiverSet(_feeReceiver);
     }
 
     modifier onlyOwner() {
@@ -112,22 +109,6 @@ contract PrismaCore {
         } else {
             emit Unpaused();
         }
-    }
-
-    /**
-     * @notice Starts sunsetting a collateral
-     *         During sunsetting only the following are possible:
-               1) Disable collateral handoff to SP
-               2) Greatly Increase interest rate to incentivize redemptions
-               3) Remove redemptions fees
-               4) Disable new loans
-     * @param troveManager Trove manager for the collateral
-     */
-    function startCollateralSunset(ITroveManager troveManager) external onlyOwner {
-        address collateral = troveManager.collateralToken();
-        troveManager.startCollateralSunset();
-        stabilityPool.startCollateralSunset(collateral);
-        emit CollateralSunsetStarted(collateral);
     }
 
     function commitTransferOwnership(address newOwner) external onlyOwner {

@@ -41,7 +41,9 @@ contract LiquidationManager is PrismaBase {
     IBorrowerOperations public immutable borrowerOperations;
     address public immutable factory;
 
-    mapping(IERC20 => ITroveManager) internal _trovesContracts;
+    uint256 private constant _100pct = 1000000000000000000; // 1e18 == 100%
+
+    mapping(ITroveManager troveManager => bool enabled) internal _enabledTroveManagers;
 
     /*
      * --- Variable container structs for liquidations ---
@@ -115,9 +117,9 @@ contract LiquidationManager is PrismaBase {
         factory = _factory;
     }
 
-    function enableCollateral(address _troveManager, IERC20 _collateral) external {
+    function enableTroveManager(ITroveManager _troveManager) external {
         require(msg.sender == factory, "Not factory");
-        _trovesContracts[_collateral] = ITroveManager(_troveManager);
+        _enabledTroveManagers[_troveManager] = true;
     }
 
     // --- Trove Liquidation functions ---
@@ -125,31 +127,27 @@ contract LiquidationManager is PrismaBase {
     /**
         @notice Liquidate a single trove
         @dev Reverts if the trove is not active, or cannot be liquidated
-        @param collateral Collateral type to perform liquidation against
         @param borrower Borrower address to liquidate
      */
-    function liquidate(IERC20 collateral, address borrower) external {
-        ITroveManager troveManager = _trovesContracts[collateral];
-
+    function liquidate(ITroveManager troveManager, address borrower) external {
         require(troveManager.getTroveStatus(borrower) == 1, "TroveManager: Trove does not exist or is closed");
 
         address[] memory borrowers = new address[](1);
         borrowers[0] = borrower;
-        batchLiquidateTroves(collateral, borrowers);
+        batchLiquidateTroves(troveManager, borrowers);
     }
 
     /**
         @notice Liquidate a sequence of troves
         @dev Iterates through troves starting with the lowest ICR
-        @param collateral Collateral type to perform liquidations against
         @param maxTrovesToLiquidate The maximum number of troves to liquidate
         @param maxICR Maximum ICR to liquidate. Should be set to MCR if the system
                       is not in recovery mode, to minimize gas costs for this call.
      */
-    function liquidateTroves(IERC20 collateral, uint256 maxTrovesToLiquidate, uint256 maxICR) external {
+    function liquidateTroves(ITroveManager troveManager, uint256 maxTrovesToLiquidate, uint256 maxICR) external {
+        require(_enabledTroveManagers[troveManager], "TroveManager not approved");
         IStabilityPool stabilityPoolCached = stabilityPool;
 
-        ITroveManager troveManager = _trovesContracts[collateral];
         troveManager.updateBalances();
 
         ISortedTroves sortedTrovesCached = ISortedTroves(troveManager.sortedTroves());
@@ -196,6 +194,7 @@ contract LiquidationManager is PrismaBase {
             entireSystemColl -= totals.totalCollToSendToSP * troveManagerValues.price;
             entireSystemDebt -= totals.totalDebtToOffset;
             address nextAccount = sortedTrovesCached.getLast();
+            ITroveManager _troveManager = troveManager; //stack too deep workaround
             while (trovesRemaining > 0 && troveCount > 1) {
                 uint ICR = troveManager.getCurrentICR(nextAccount, troveManagerValues.price);
                 if (ICR > maxICR) break;
@@ -207,8 +206,9 @@ contract LiquidationManager is PrismaBase {
 
                 uint256 TCR = PrismaMath._computeCR(entireSystemColl, entireSystemDebt);
                 if (TCR >= CCR || ICR >= TCR) break;
+
                 singleLiquidation = _tryLiquidateWithCap(
-                    troveManager,
+                    _troveManager,
                     account,
                     debtInStabPool,
                     troveManagerValues.MCR,
@@ -230,7 +230,11 @@ contract LiquidationManager is PrismaBase {
         require(totals.totalDebtInSequence > 0, "TroveManager: nothing to liquidate");
         if (totals.totalDebtToOffset > 0 || totals.totalCollToSendToSP > 0) {
             // Move liquidated collateral and Debt to the appropriate pools
-            stabilityPoolCached.offset(address(collateral), totals.totalDebtToOffset, totals.totalCollToSendToSP);
+            stabilityPoolCached.offset(
+                troveManager.collateralToken(),
+                totals.totalDebtToOffset,
+                totals.totalCollToSendToSP
+            );
             troveManager.decreaseDebtAndSendCollateral(
                 address(stabilityPoolCached),
                 totals.totalDebtToOffset,
@@ -257,15 +261,14 @@ contract LiquidationManager is PrismaBase {
     /**
         @notice Liquidate a custom list of troves
         @dev Reverts if there is not a single trove that can be liquidated
-        @param collateral Collateral type to perform liquidations against
         @param _troveArray List of borrower addresses to liquidate. Troves that were already
                            liquidated, or cannot be liquidated, are ignored.
      */
     /*
      * Attempt to liquidate a custom list of troves provided by the caller.
      */
-    function batchLiquidateTroves(IERC20 collateral, address[] memory _troveArray) public {
-        ITroveManager troveManager = _trovesContracts[collateral];
+    function batchLiquidateTroves(ITroveManager troveManager, address[] memory _troveArray) public {
+        require(_enabledTroveManagers[troveManager], "TroveManager not approved");
         require(_troveArray.length != 0, "TroveManager: Calldata address array must not be empty");
         troveManager.updateBalances();
 
@@ -358,7 +361,11 @@ contract LiquidationManager is PrismaBase {
 
         if (totals.totalDebtToOffset > 0 || totals.totalCollToSendToSP > 0) {
             // Move liquidated collateral and Debt to the appropriate pools
-            stabilityPoolCached.offset(address(collateral), totals.totalDebtToOffset, totals.totalCollToSendToSP);
+            stabilityPoolCached.offset(
+                troveManager.collateralToken(),
+                totals.totalDebtToOffset,
+                totals.totalCollToSendToSP
+            );
             troveManager.decreaseDebtAndSendCollateral(
                 address(stabilityPoolCached),
                 totals.totalDebtToOffset,

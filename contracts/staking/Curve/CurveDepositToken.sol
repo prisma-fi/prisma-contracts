@@ -4,7 +4,7 @@ pragma solidity 0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "../../interfaces/ICurveProxy.sol";
-import "../../interfaces/ITreasury.sol";
+import "../../interfaces/IVault.sol";
 import "../../interfaces/ILiquidityGauge.sol";
 import "../../dependencies/PrismaOwnable.sol";
 
@@ -19,7 +19,7 @@ contract CurveDepositToken {
     IERC20 public immutable PRISMA;
     IERC20 public immutable CRV;
     ICurveProxy public immutable curveProxy;
-    IPrismaTreasury public immutable treasury;
+    IPrismaVault public immutable vault;
 
     ILiquidityGauge public gauge;
     IERC20 public lpToken;
@@ -41,7 +41,7 @@ contract CurveDepositToken {
     uint32 public periodFinish;
 
     mapping(address => uint256[2]) public rewardIntegralFor;
-    mapping(address => uint128[2]) private pendingRewardFor;
+    mapping(address => uint128[2]) private storedPendingReward;
 
     uint256 constant REWARD_DURATION = 1 weeks;
 
@@ -51,11 +51,11 @@ contract CurveDepositToken {
     event LPTokenWithdrawn(address indexed lpToken, address indexed receiver, uint256 amount);
     event RewardClaimed(address indexed receiver, uint256 prismaAmount, uint256 crvAmount);
 
-    constructor(IERC20 _prisma, IERC20 _CRV, ICurveProxy _curveProxy, IPrismaTreasury _treasury) {
+    constructor(IERC20 _prisma, IERC20 _CRV, ICurveProxy _curveProxy, IPrismaVault _vault) {
         PRISMA = _prisma;
         CRV = _CRV;
         curveProxy = _curveProxy;
-        treasury = _treasury;
+        vault = _vault;
     }
 
     function initialize(ILiquidityGauge _gauge) external {
@@ -74,7 +74,7 @@ contract CurveDepositToken {
     }
 
     function notifyRegisteredId(uint256[] memory assignedIds) external returns (bool) {
-        require(msg.sender == address(treasury));
+        require(msg.sender == address(vault));
         require(emissionId == 0, "Already registered");
         require(assignedIds.length == 1, "Incorrect ID count");
         emissionId = assignedIds[0];
@@ -93,6 +93,8 @@ contract CurveDepositToken {
 
         _updateIntegrals(receiver, balance, supply);
         if (block.timestamp / 1 weeks >= periodFinish / 1 weeks) _fetchRewards();
+
+        emit Transfer(address(0), receiver, amount);
         emit LPTokenDeposited(address(lpToken), receiver, amount);
 
         return true;
@@ -108,6 +110,8 @@ contract CurveDepositToken {
 
         _updateIntegrals(msg.sender, balance, supply);
         if (block.timestamp / 1 weeks >= periodFinish / 1 weeks) _fetchRewards();
+
+        emit Transfer(msg.sender, address(0), amount);
         emit LPTokenWithdrawn(address(lpToken), receiver, amount);
 
         return true;
@@ -115,8 +119,8 @@ contract CurveDepositToken {
 
     function _claimReward(address claimant, address receiver) internal returns (uint128[2] memory amounts) {
         _updateIntegrals(claimant, balanceOf[claimant], totalSupply);
-        amounts = pendingRewardFor[claimant];
-        delete pendingRewardFor[claimant];
+        amounts = storedPendingReward[claimant];
+        delete storedPendingReward[claimant];
 
         CRV.transfer(receiver, amounts[1]);
         return amounts;
@@ -124,14 +128,14 @@ contract CurveDepositToken {
 
     function claimReward(address receiver) external returns (uint256 prismaAmount, uint256 crvAmount) {
         uint128[2] memory amounts = _claimReward(msg.sender, receiver);
-        treasury.transferAllocatedTokens(msg.sender, receiver, amounts[0]);
+        vault.transferAllocatedTokens(msg.sender, receiver, amounts[0]);
 
         emit RewardClaimed(receiver, amounts[0], amounts[1]);
         return (amounts[0], amounts[1]);
     }
 
-    function treasuryClaimReward(address claimant, address receiver) external returns (uint256) {
-        require(msg.sender == address(treasury));
+    function vaultClaimReward(address claimant, address receiver) external returns (uint256) {
+        require(msg.sender == address(vault));
         uint128[2] memory amounts = _claimReward(claimant, receiver);
 
         emit RewardClaimed(receiver, 0, amounts[1]);
@@ -152,7 +156,7 @@ contract CurveDepositToken {
                 integral += (duration * rewardRate[i] * 1e18) / supply;
             }
             uint256 integralFor = rewardIntegralFor[account][i];
-            amounts[i] = pendingRewardFor[account][i] + ((balance * (integral - integralFor)) / 1e18);
+            amounts[i] = storedPendingReward[account][i] + ((balance * (integral - integralFor)) / 1e18);
         }
         return (amounts[0], amounts[1]);
     }
@@ -205,7 +209,7 @@ contract CurveDepositToken {
             }
             uint256 integralFor = rewardIntegralFor[account][i];
             if (integral > integralFor) {
-                pendingRewardFor[account][i] += uint128((balance * (integral - integralFor)) / 1e18);
+                storedPendingReward[account][i] += uint128((balance * (integral - integralFor)) / 1e18);
                 rewardIntegralFor[account][i] = integral;
             }
         }
@@ -219,9 +223,14 @@ contract CurveDepositToken {
     function _fetchRewards() internal {
         uint256 prismaAmount;
         uint256 id = emissionId;
-        if (id > 0) prismaAmount = treasury.allocateNewEmissions(id);
+        if (id > 0) prismaAmount = vault.allocateNewEmissions(id);
 
-        uint256 crvAmount = curveProxy.mintCRV(address(gauge), address(this));
+        // try/catch to allow active receiver before Curve gauge is voted in
+        uint256 crvAmount;
+        try curveProxy.mintCRV(address(gauge), address(this)) returns (uint256 minted) {
+            crvAmount = minted;
+        } catch {}
+
         uint256 _periodFinish = periodFinish;
         if (block.timestamp < _periodFinish) {
             uint256 remaining = _periodFinish - block.timestamp;

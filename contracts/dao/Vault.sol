@@ -18,25 +18,26 @@ interface IEmissionReceiver {
 }
 
 interface IRewards {
-    function treasuryClaimReward(address claimant, address receiver) external returns (uint256);
+    function vaultClaimReward(address claimant, address receiver) external returns (uint256);
 
     function claimableReward(address account) external view returns (uint256);
 }
 
 /**
-    @title Prisma Treasury
+    @title Prisma Vault
     @notice The total supply of PRISMA is initially minted to this contract.
             The token balance held here can be considered "uncirculating". The
-            treasury gradually releases tokens to registered emissions receivers
+            vault gradually releases tokens to registered emissions receivers
             as determined by `EmissionSchedule` and `BoostCalculator`.
  */
-contract PrismaTreasury is PrismaOwnable, SystemStart {
+contract PrismaVault is PrismaOwnable, SystemStart {
     using Address for address;
     using SafeERC20 for IERC20;
 
     IPrismaToken public immutable prismaToken;
     ITokenLocker public immutable locker;
     IIncentiveVoting public immutable voter;
+    address public immutable deploymentManager;
     uint256 immutable lockToTokenRatio;
 
     IEmissionSchedule public emissionSchedule;
@@ -56,7 +57,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
     uint16[65535] public receiverUpdatedWeek;
     // id -> address of receiver
     // not bi-directional, one receiver can have multiple ids
-    mapping(uint256 => address) public idToReceiver;
+    mapping(uint256 => Receiver) public idToReceiver;
 
     // week -> total amount of tokens to be released in that week
     uint128[65535] public weeklyEmissions;
@@ -68,9 +69,14 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
     mapping(address => uint128[65535]) accountWeeklyEarned;
 
     // pending rewards for an address (dust after locking, fees from delegation)
-    mapping(address => uint256) public pendingRewardFor;
+    mapping(address => uint256) private storedPendingReward;
 
     mapping(address => Delegation) public boostDelegation;
+
+    struct Receiver {
+        address account;
+        bool isActive;
+    }
 
     struct Delegation {
         bool isEnabled;
@@ -84,6 +90,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
     }
 
     event NewReceiverRegistered(address receiver, uint256 id);
+    event ReceiverIsActiveStatusModified(uint256 indexed id, bool isActive);
     event UnallocatedSupplyReduced(uint256 reducedAmount, uint256 unallocatedTotal);
     event UnallocatedSupplyIncreased(uint256 increasedAmount, uint256 unallocatedTotal);
     event IncreasedAllocation(address indexed receiver, uint256 increasedAmount);
@@ -96,43 +103,63 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         IPrismaToken _token,
         ITokenLocker _locker,
         IIncentiveVoting _voter,
-        IEmissionSchedule _emissionSchedule,
-        IBoostCalculator _boostCalculator,
         address _stabilityPool,
-        uint64 initialLockWeeks,
-        uint128[] memory _fixedInitialAmounts,
-        InitialAllowance[] memory initialAllowances
+        address _manager
     ) PrismaOwnable(_prismaCore) SystemStart(_prismaCore) {
         prismaToken = _token;
         locker = _locker;
         voter = _voter;
-        emissionSchedule = _emissionSchedule;
-        boostCalculator = _boostCalculator;
+        lockToTokenRatio = _locker.lockToTokenRatio();
+        deploymentManager = _manager;
 
         // ensure the stability pool is registered with receiver ID 0
         _voter.registerNewReceiver();
-        idToReceiver[0] = _stabilityPool;
+        idToReceiver[0] = Receiver({ account: _stabilityPool, isActive: true });
         emit NewReceiverRegistered(_stabilityPool, 0);
+    }
 
-        for (uint256 i = 0; i < _fixedInitialAmounts.length; i++) {
-            weeklyEmissions[i + 1] = _fixedInitialAmounts[i];
+    function setInitialParameters(
+        IEmissionSchedule _emissionSchedule,
+        IBoostCalculator _boostCalculator,
+        uint256 totalSupply,
+        uint64 initialLockWeeks,
+        uint128[] memory _fixedInitialAmounts,
+        InitialAllowance[] memory initialAllowances
+    ) external {
+        require(msg.sender == deploymentManager, "!deploymentManager");
+        emissionSchedule = _emissionSchedule;
+        boostCalculator = _boostCalculator;
+
+        // mint totalSupply to vault - this reverts after the first call
+        prismaToken.mintToVault(totalSupply);
+
+        // set initial fixed weekly emissions
+        uint256 totalAllocated;
+        uint256 length = _fixedInitialAmounts.length;
+        uint256 offset = getWeek() + 1;
+        for (uint256 i = 0; i < length; i++) {
+            uint128 amount = _fixedInitialAmounts[i];
+            weeklyEmissions[i + offset] = amount;
+            totalAllocated += amount;
         }
-        lockWeeks = initialLockWeeks;
 
         // set initial transfer allowances for airdrops, vests, bribes
-        uint256 total;
-        for (uint256 i = 0; i < initialAllowances.length; i++) {
+        length = initialAllowances.length;
+        for (uint256 i = 0; i < length; i++) {
             uint256 amount = initialAllowances[i].amount;
             address receiver = initialAllowances[i].receiver;
-            total += amount;
+            totalAllocated += amount;
             // initial allocations are given as approvals
-            _token.increaseAllowance(receiver, amount);
+            prismaToken.increaseAllowance(receiver, amount);
         }
 
-        unallocatedTotal = uint128(_token.totalSupply() - total);
-        lockToTokenRatio = _locker.lockToTokenRatio();
+        unallocatedTotal = uint128(totalSupply - totalAllocated);
+        totalUpdateWeek = uint64(_fixedInitialAmounts.length + offset - 1);
+        lockWeeks = initialLockWeeks;
 
-        emit UnallocatedSupplyReduced(total, unallocatedTotal);
+        emit EmissionScheduleSet(address(_emissionSchedule));
+        emit BoostCalculatorSet(address(_boostCalculator));
+        emit UnallocatedSupplyReduced(totalAllocated, unallocatedTotal);
     }
 
     /**
@@ -144,11 +171,12 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
      */
     function registerReceiver(address receiver, uint256 count) external onlyOwner returns (bool) {
         uint256[] memory assignedIds = new uint256[](count);
+        uint16 week = uint16(getWeek());
         for (uint256 i = 0; i < count; i++) {
             uint256 id = voter.registerNewReceiver();
             assignedIds[i] = id;
-            receiverUpdatedWeek[id] = uint16(getWeek());
-            idToReceiver[id] = receiver;
+            receiverUpdatedWeek[id] = week;
+            idToReceiver[id] = Receiver({ account: receiver, isActive: true });
             emit NewReceiverRegistered(receiver, id);
         }
         // notify the receiver contract of the newly registered ID
@@ -159,10 +187,30 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
     }
 
     /**
+        @notice Modify the active status of an existing receiver
+        @dev Emissions directed to an inactive receiver are instead returned to
+             the unallocated supply. This way potential emissions are not lost
+             due to old emissions votes pointing at a receiver that was phased out.
+        @param id ID of the receiver to modify the isActive status for
+        @param isActive is this receiver eligible to receive emissions?
+     */
+    function setReceiverIsActive(uint256 id, bool isActive) external onlyOwner returns (bool) {
+        Receiver memory receiver = idToReceiver[id];
+        require(receiver.account != address(0), "ID not set");
+        receiver.isActive = isActive;
+        idToReceiver[id] = receiver;
+        emit ReceiverIsActiveStatusModified(id, isActive);
+
+        return true;
+    }
+
+    /**
         @notice Set the `emissionSchedule` contract
-        @dev Callable only by the owner (the DAO admin voter, to change the emission schedule)
+        @dev Callable only by the owner (the DAO admin voter, to change the emission schedule).
+             The new schedule is applied from the start of the next epoch.
      */
     function setEmissionSchedule(IEmissionSchedule _emissionSchedule) external onlyOwner returns (bool) {
+        _allocateTotalWeekly(emissionSchedule, getWeek());
         emissionSchedule = _emissionSchedule;
         emit EmissionScheduleSet(address(_emissionSchedule));
 
@@ -177,10 +225,11 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
     }
 
     /**
-        @notice Transfer tokens out of the treasury
+        @notice Transfer tokens out of the vault
      */
     function transferTokens(IERC20 token, address receiver, uint256 amount) external onlyOwner returns (bool) {
         if (address(token) == address(prismaToken)) {
+            require(receiver != address(this), "Self transfer denied");
             uint256 unallocated = unallocatedTotal - amount;
             unallocatedTotal = uint128(unallocated);
             emit UnallocatedSupplyReduced(amount, unallocated);
@@ -202,54 +251,72 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         return true;
     }
 
+    function _allocateTotalWeekly(IEmissionSchedule _emissionSchedule, uint256 currentWeek) internal {
+        uint256 week = totalUpdateWeek;
+        if (week >= currentWeek) return;
+
+        if (address(_emissionSchedule) == address(0)) {
+            totalUpdateWeek = uint64(currentWeek);
+            return;
+        }
+
+        uint256 lock;
+        uint256 weeklyAmount;
+        uint256 unallocated = unallocatedTotal;
+        while (week < currentWeek) {
+            ++week;
+            (weeklyAmount, lock) = _emissionSchedule.getTotalWeeklyEmissions(week, unallocated);
+            weeklyEmissions[week] = uint128(weeklyAmount);
+
+            unallocated = unallocated - weeklyAmount;
+            emit UnallocatedSupplyReduced(weeklyAmount, unallocated);
+        }
+
+        unallocatedTotal = uint128(unallocated);
+        totalUpdateWeek = uint64(currentWeek);
+        lockWeeks = uint64(lock);
+    }
+
     /**
         @notice Allocate additional `prismaToken` allowance to an emission reciever
                 based on the emission schedule
         @param id Receiver ID. The caller must be the receiver mapped to this ID.
         @return uint256 Additional `prismaToken` allowance for the receiver. The receiver
-                        accesses the tokens using `Treasury.transferAllocatedTokens`
+                        accesses the tokens using `Vault.transferAllocatedTokens`
      */
     function allocateNewEmissions(uint256 id) external returns (uint256) {
-        require(idToReceiver[id] == msg.sender, "Receiver not registered");
-        uint256 receiverWeek = receiverUpdatedWeek[id];
+        Receiver memory receiver = idToReceiver[id];
+        require(receiver.account == msg.sender, "Receiver not registered");
+        uint256 week = receiverUpdatedWeek[id];
         uint256 currentWeek = getWeek();
-        if (receiverWeek == currentWeek) return 0;
+        if (week == currentWeek) return 0;
 
-        uint256 totalWeek = totalUpdateWeek;
-        uint256 week = receiverWeek < totalWeek ? receiverWeek : totalWeek;
+        IEmissionSchedule _emissionSchedule = emissionSchedule;
+        _allocateTotalWeekly(_emissionSchedule, currentWeek);
+
+        if (address(_emissionSchedule) == address(0)) {
+            receiverUpdatedWeek[id] = uint16(currentWeek);
+            return 0;
+        }
+
         uint256 amount;
         while (week < currentWeek) {
             ++week;
-            uint256 weeklyAmount = weeklyEmissions[week];
-            if (totalWeek < week) {
-                ++totalWeek;
-                uint256 unallocated = unallocatedTotal;
-                if (weeklyAmount == 0) {
-                    uint256 lock;
-                    (weeklyAmount, lock) = emissionSchedule.getTotalWeeklyEmissions(week, unallocated);
-                    weeklyEmissions[week] = uint128(weeklyAmount);
-                    lockWeeks = uint64(lock);
-                }
-                unallocated = unallocated - weeklyAmount;
-                unallocatedTotal = uint128(unallocated);
-
-                // very unlikely that this function is not called at least weekly,
-                // so we directly update the storage variable on each iteration
-                totalUpdateWeek = uint64(week);
-
-                emit UnallocatedSupplyReduced(weeklyAmount, unallocated);
-            }
-            if (receiverWeek < week) {
-                ++receiverWeek;
-                amount = amount + emissionSchedule.getReceiverWeeklyEmissions(id, receiverWeek, weeklyAmount);
-            }
+            amount = amount + _emissionSchedule.getReceiverWeeklyEmissions(id, week, weeklyEmissions[week]);
         }
 
         receiverUpdatedWeek[id] = uint16(currentWeek);
-        if (amount > 0) allocated[msg.sender] = allocated[msg.sender] + amount;
-        emit IncreasedAllocation(msg.sender, amount);
-
-        return amount;
+        if (receiver.isActive) {
+            allocated[msg.sender] = allocated[msg.sender] + amount;
+            emit IncreasedAllocation(msg.sender, amount);
+            return amount;
+        } else {
+            // if receiver is not active, return allocation to the unallocated supply
+            uint256 unallocated = unallocatedTotal + amount;
+            unallocatedTotal = uint128(unallocated);
+            emit UnallocatedSupplyIncreased(amount, unallocated);
+            return 0;
+        }
     }
 
     /**
@@ -259,22 +326,14 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         @param claimant Address that is claiming the tokens
         @param receiver Address to transfer tokens to
         @param amount Desired amount of tokens to transfer. This value always assumes max boost.
-        @return claimed Actual amount of tokens transferred, plus the sum left behind due to
-                        insufficient boost. May be less than `amount` if tokens were locked.
+        @return bool success
      */
-    function transferAllocatedTokens(
-        address claimant,
-        address receiver,
-        uint256 amount
-    ) external returns (uint256 claimed) {
+    function transferAllocatedTokens(address claimant, address receiver, uint256 amount) external returns (bool) {
         if (amount > 0) {
             allocated[msg.sender] -= amount;
-            amount += pendingRewardFor[claimant];
-            pendingRewardFor[claimant] = 0;
-            claimed = _transferAllocated(0, claimant, receiver, address(0), amount);
-            pendingRewardFor[claimant] += amount - claimed;
+            _transferAllocated(0, claimant, receiver, address(0), amount);
         }
-        return claimed;
+        return true;
     }
 
     /**
@@ -286,28 +345,37 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         @param rewardContracts Array of addresses of registered receiver contracts where
                                the caller has pending rewards to claim.
         @param maxFeePct Maximum fee percent to pay to delegate, as a whole number out of 10000
-        @return uint256 Actual amount of tokens transferred, plus the sum left behind due to
-                        insufficient boost. May be less than `amount` if tokens were locked.
+        @return bool success
      */
     function batchClaimRewards(
         address receiver,
         address boostDelegate,
         IRewards[] calldata rewardContracts,
         uint256 maxFeePct
-    ) external returns (uint256) {
+    ) external returns (bool) {
         require(maxFeePct <= 10000, "Invalid maxFeePct");
-        uint256 total = pendingRewardFor[msg.sender];
-        pendingRewardFor[msg.sender] = 0;
 
+        uint256 total;
         uint256 length = rewardContracts.length;
         for (uint256 i = 0; i < length; i++) {
-            uint256 amount = rewardContracts[i].treasuryClaimReward(msg.sender, receiver);
+            uint256 amount = rewardContracts[i].vaultClaimReward(msg.sender, receiver);
             allocated[address(rewardContracts[i])] -= amount;
             total += amount;
         }
-        uint256 claimed = _transferAllocated(maxFeePct, msg.sender, receiver, boostDelegate, total);
-        pendingRewardFor[msg.sender] += total - claimed;
-        return claimed;
+        _transferAllocated(maxFeePct, msg.sender, receiver, boostDelegate, total);
+        return true;
+    }
+
+    /**
+        @notice Claim tokens earned from boost delegation fees
+        @param receiver Address to transfer the tokens to
+        @return bool Success
+     */
+    function claimBoostDelegationFees(address receiver) external returns (bool) {
+        uint256 amount = storedPendingReward[msg.sender];
+        require(amount >= lockToTokenRatio, "Nothing to claim");
+        _transferOrLock(msg.sender, receiver, amount);
+        return true;
     }
 
     function _transferAllocated(
@@ -316,7 +384,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         address receiver,
         address boostDelegate,
         uint256 amount
-    ) internal returns (uint256) {
+    ) internal {
         if (amount > 0) {
             uint256 week = getWeek();
             uint256 totalWeekly = weeklyEmissions[week];
@@ -331,7 +399,7 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
                 delegateCallback = data.callback;
                 require(data.isEnabled, "Invalid delegate");
                 if (data.feePct == type(uint16).max) {
-                    fee = delegateCallback.getFeePct(account, amount, previousAmount, totalWeekly);
+                    fee = delegateCallback.getFeePct(account, receiver, amount, previousAmount, totalWeekly);
                     require(fee <= 10000, "Invalid delegate fee");
                 } else fee = data.feePct;
                 require(fee <= maxFeePct, "fee exceeds maxFeePct");
@@ -344,7 +412,17 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
                 previousAmount,
                 totalWeekly
             );
-            uint256 boostUnclaimed = amount - adjustedAmount;
+            {
+                // remaining tokens from unboosted claims are added to the unallocated total
+                // context avoids stack-too-deep
+                uint256 boostUnclaimed = amount - adjustedAmount;
+                if (boostUnclaimed > 0) {
+                    uint256 unallocated = unallocatedTotal + boostUnclaimed;
+                    unallocatedTotal = uint128(unallocated);
+                    emit UnallocatedSupplyIncreased(boostUnclaimed, unallocated);
+                }
+            }
+            accountWeeklyEarned[claimant][week] = uint128(previousAmount + amount);
 
             // apply boost delegation fee
             if (fee != 0) {
@@ -352,34 +430,20 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
                 adjustedAmount -= fee;
             }
 
-            // transfer or lock tokens
-            uint256 _lockWeeks = lockWeeks;
-            if (_lockWeeks == 0) prismaToken.transfer(receiver, adjustedAmount);
-            else {
-                // if token lock ratio reduces amount to zero, do nothing
-                uint256 lockAmount = adjustedAmount / lockToTokenRatio;
-                if (lockAmount == 0) return 0;
+            // add `storedPendingReward` to `adjustedAmount`
+            // this happens after any boost modifiers or delegation fees, since
+            // these effects were already applied to the stored value
+            adjustedAmount += storedPendingReward[account];
 
-                // lock for receiver, and adjust amounts based on token lock ratio
-                locker.lock(receiver, lockAmount, _lockWeeks);
-                adjustedAmount = lockAmount * lockToTokenRatio;
-                amount = adjustedAmount + boostUnclaimed + fee;
-            }
-
-            // remaining tokens from unboosted claims are added to the unallocated total
-            if (boostUnclaimed > 0) {
-                uint256 unallocated = unallocatedTotal + boostUnclaimed;
-                unallocatedTotal = uint128(unallocated);
-                emit UnallocatedSupplyIncreased(boostUnclaimed, unallocated);
-            }
-            accountWeeklyEarned[claimant][week] = uint128(previousAmount + amount);
+            _transferOrLock(account, receiver, adjustedAmount);
 
             // apply delegate fee and optionally perform callback
-            if (fee != 0) pendingRewardFor[boostDelegate] += fee;
+            if (fee != 0) storedPendingReward[boostDelegate] += fee;
             if (address(delegateCallback) != address(0)) {
                 require(
                     delegateCallback.delegatedBoostCallback(
                         account,
+                        receiver,
                         amount,
                         adjustedAmount,
                         fee,
@@ -390,8 +454,19 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
                 );
             }
         }
+    }
 
-        return amount;
+    function _transferOrLock(address claimant, address receiver, uint256 amount) internal {
+        uint256 _lockWeeks = lockWeeks;
+        if (_lockWeeks == 0) {
+            storedPendingReward[claimant] = 0;
+            prismaToken.transfer(receiver, amount);
+        } else {
+            // lock for receiver and store remaining balance in `storedPendingReward`
+            uint256 lockAmount = amount / lockToTokenRatio;
+            storedPendingReward[claimant] = amount - lockAmount * lockToTokenRatio;
+            if (lockAmount > 0) locker.lock(receiver, lockAmount, _lockWeeks);
+        }
     }
 
     /**
@@ -402,12 +477,13 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         @param boostDelegate Address to delegate boost from when claiming. Set as
                              `address(0)` to use the boost of the claimer.
         @param rewardContract Address of the contract where rewards are being claimed
-        @return adjustedAmount Amount received after boost and delegate fees
+        @return adjustedAmount Amount received after boost, prior to paying delegate fee
         @return feeToDelegate Fee amount paid to `boostDelegate`
 
      */
     function claimableRewardAfterBoost(
         address account,
+        address receiver,
         address boostDelegate,
         IRewards rewardContract
     ) external view returns (uint256 adjustedAmount, uint256 feeToDelegate) {
@@ -423,11 +499,15 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
             if (!data.isEnabled) return (0, 0);
             fee = data.feePct;
             if (fee == type(uint16).max) {
-                try data.callback.getFeePct(claimant, amount, previousAmount, totalWeekly) returns (uint256) {} catch {
+                try data.callback.getFeePct(claimant, receiver, amount, previousAmount, totalWeekly) returns (
+                    uint256 _fee
+                ) {
+                    fee = _fee;
+                } catch {
                     return (0, 0);
                 }
             }
-            if (fee >= 10000) return (0, 0);
+            if (fee > 10000) return (0, 0);
         }
 
         adjustedAmount = boostCalculator.getBoostedAmount(claimant, amount, previousAmount, totalWeekly);
@@ -475,5 +555,14 @@ contract PrismaTreasury is PrismaOwnable, SystemStart {
         uint256 totalWeekly = weeklyEmissions[week];
         uint256 previousAmount = accountWeeklyEarned[claimant][week];
         return boostCalculator.getClaimableWithBoost(claimant, previousAmount, totalWeekly);
+    }
+
+    /**
+        @notice Get the claimable amount that `claimant` has earned boost delegation fees
+     */
+    function claimableBoostDelegationFees(address claimant) external view returns (uint256 amount) {
+        amount = storedPendingReward[claimant];
+        // only return values `>= lockToTokenRatio` so we do not report "dust" stored for normal users
+        return amount >= lockToTokenRatio ? amount : 0;
     }
 }

@@ -26,11 +26,11 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
     address public immutable factory;
     uint256 public minNetDebt;
 
-    mapping(IERC20 => TrovesContracts) internal _trovesContracts;
+    mapping(ITroveManager => TroveManagerData) public troveManagersData;
     ITroveManager[] internal _troveManagers;
 
-    struct TrovesContracts {
-        ITroveManager troveManager;
+    struct TroveManagerData {
+        IERC20 collateralToken;
         uint16 index;
     }
 
@@ -85,7 +85,8 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
     event TroveCreated(address indexed _borrower, uint256 arrayIndex);
     event TroveUpdated(address indexed _borrower, uint256 _debt, uint256 _coll, uint256 stake, uint8 operation);
     event BorrowingFeePaid(address indexed borrower, uint256 amount);
-    event CollateralEnabled(address collateralToken);
+    event CollateralConfigured(ITroveManager troveManager, IERC20 collateralToken);
+    event TroveManagerRemoved(ITroveManager troveManager);
 
     constructor(
         address _prismaCore,
@@ -108,28 +109,42 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         minNetDebt = _minNetDebt;
     }
 
-    function enableCollateral(ITroveManager troveManager, IERC20 collateralToken) external {
+    function configureCollateral(ITroveManager troveManager, IERC20 collateralToken) external {
         require(msg.sender == factory, "!factory");
-        require(address(_trovesContracts[collateralToken].troveManager) == address(0), "Collateral already enabled");
-        _trovesContracts[collateralToken] = TrovesContracts(troveManager, uint16(_troveManagers.length));
+        troveManagersData[troveManager] = TroveManagerData(collateralToken, uint16(_troveManagers.length));
         _troveManagers.push(troveManager);
-        emit CollateralEnabled(address(collateralToken));
+        emit CollateralConfigured(troveManager, collateralToken);
     }
 
-    function getTCR(
-        SystemBalances memory balances
-    ) public pure returns (uint256 amount, uint256 totalPricedCollateral, uint256 totalDebt) {
-        uint256 loopEnd = balances.collaterals.length;
-        for (uint256 i; i < loopEnd; ) {
-            totalPricedCollateral += (balances.collaterals[i] * balances.prices[i]);
-            totalDebt += balances.debts[i];
-            unchecked {
-                ++i;
-            }
+    function removeTroveManager(ITroveManager troveManager) external {
+        TroveManagerData memory tmData = troveManagersData[troveManager];
+        require(
+            address(tmData.collateralToken) != address(0) &&
+                troveManager.sunsetting() &&
+                troveManager.getEntireSystemDebt() == 0,
+            "Trove Manager cannot be removed"
+        );
+        delete troveManagersData[troveManager];
+        uint256 lastIndex = _troveManagers.length - 1;
+        if (tmData.index < lastIndex) {
+            ITroveManager lastTm = _troveManagers[lastIndex];
+            _troveManagers[tmData.index] = lastTm;
+            troveManagersData[lastTm].index = tmData.index;
         }
-        amount = PrismaMath._computeCR(totalPricedCollateral, totalDebt);
 
-        return (amount, totalPricedCollateral, totalDebt);
+        _troveManagers.pop();
+        emit TroveManagerRemoved(troveManager);
+    }
+
+    /**
+        @notice Get the global total collateral ratio
+        @dev Not a view because fetching from the oracle is state changing.
+             Can still be accessed as a view from within the UX.
+     */
+    function getTCR() external returns (uint256 globalTotalCollateralRatio) {
+        SystemBalances memory balances = fetchBalances();
+        (globalTotalCollateralRatio, , ) = _getTCRData(balances);
+        return globalTotalCollateralRatio;
     }
 
     /**
@@ -168,7 +183,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
     // --- Borrower Trove Operations ---
 
     function openTrove(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _maxFeePercentage,
         uint256 _collateralAmount,
@@ -177,17 +192,16 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         address _lowerHint
     ) external callerOrDelegated(account) {
         require(!PRISMA_CORE.paused(), "Deposits are paused");
-
-        ITroveManager troveManager;
+        IERC20 collateralToken;
         LocalVariables_openTrove memory vars;
         bool isRecoveryMode;
         (
-            troveManager,
+            collateralToken,
             vars.price,
             vars.totalPricedCollateral,
             vars.totalDebt,
             isRecoveryMode
-        ) = _getTroveManagerAndTCRData(collateralToken);
+        ) = _getCollateralAndTCRData(troveManager);
 
         _requireValidMaxFeePercentage(_maxFeePercentage);
 
@@ -241,30 +255,30 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
 
     // Send collateral to a trove
     function addColl(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _collateralAmount,
         address _upperHint,
         address _lowerHint
     ) external callerOrDelegated(account) {
         require(!PRISMA_CORE.paused(), "Trove adjustments are paused");
-        _adjustTrove(collateralToken, account, 0, _collateralAmount, 0, 0, false, _upperHint, _lowerHint);
+        _adjustTrove(troveManager, account, 0, _collateralAmount, 0, 0, false, _upperHint, _lowerHint);
     }
 
     // Withdraw collateral from a trove
     function withdrawColl(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _collWithdrawal,
         address _upperHint,
         address _lowerHint
     ) external callerOrDelegated(account) {
-        _adjustTrove(collateralToken, account, 0, 0, _collWithdrawal, 0, false, _upperHint, _lowerHint);
+        _adjustTrove(troveManager, account, 0, 0, _collWithdrawal, 0, false, _upperHint, _lowerHint);
     }
 
     // Withdraw Debt tokens from a trove: mint new Debt tokens to the owner, and increase the trove's debt accordingly
     function withdrawDebt(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _maxFeePercentage,
         uint256 _debtAmount,
@@ -272,22 +286,22 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         address _lowerHint
     ) external callerOrDelegated(account) {
         require(!PRISMA_CORE.paused(), "Withdrawals are paused");
-        _adjustTrove(collateralToken, account, _maxFeePercentage, 0, 0, _debtAmount, true, _upperHint, _lowerHint);
+        _adjustTrove(troveManager, account, _maxFeePercentage, 0, 0, _debtAmount, true, _upperHint, _lowerHint);
     }
 
     // Repay Debt tokens to a Trove: Burn the repaid Debt tokens, and reduce the trove's debt accordingly
     function repayDebt(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _debtAmount,
         address _upperHint,
         address _lowerHint
     ) external callerOrDelegated(account) {
-        _adjustTrove(collateralToken, account, 0, 0, 0, _debtAmount, false, _upperHint, _lowerHint);
+        _adjustTrove(troveManager, account, 0, 0, 0, _debtAmount, false, _upperHint, _lowerHint);
     }
 
     function adjustTrove(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _maxFeePercentage,
         uint256 _collDeposit,
@@ -300,7 +314,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         require((_collDeposit == 0 && !_isDebtIncrease) || !PRISMA_CORE.paused(), "Trove adjustments are paused");
         require(_collDeposit == 0 || _collWithdrawal == 0, "BorrowerOperations: Cannot withdraw and add coll");
         _adjustTrove(
-            collateralToken,
+            troveManager,
             account,
             _maxFeePercentage,
             _collDeposit,
@@ -313,7 +327,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
     }
 
     function _adjustTrove(
-        IERC20 collateralToken,
+        ITroveManager troveManager,
         address account,
         uint256 _maxFeePercentage,
         uint256 _collDeposit,
@@ -328,16 +342,16 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
             "BorrowerOps: There must be either a collateral change or a debt change"
         );
 
-        ITroveManager troveManager;
+        IERC20 collateralToken;
         LocalVariables_adjustTrove memory vars;
         bool isRecoveryMode;
         (
-            troveManager,
+            collateralToken,
             vars.price,
             vars.totalPricedCollateral,
             vars.totalDebt,
             isRecoveryMode
-        ) = _getTroveManagerAndTCRData(collateralToken);
+        ) = _getCollateralAndTCRData(troveManager);
 
         (vars.coll, vars.debt) = troveManager.applyPendingRewards(account);
 
@@ -391,15 +405,15 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         emit TroveUpdated(vars.account, vars.newDebt, vars.newColl, vars.stake, BorrowerOperation.adjustTrove);
     }
 
-    function closeTrove(IERC20 collateralToken, address account) external callerOrDelegated(account) {
-        ITroveManager troveManager;
+    function closeTrove(ITroveManager troveManager, address account) external callerOrDelegated(account) {
+        IERC20 collateralToken;
 
         uint256 price;
         bool isRecoveryMode;
         uint256 totalPricedCollateral;
         uint256 totalDebt;
-        (troveManager, price, totalPricedCollateral, totalDebt, isRecoveryMode) = _getTroveManagerAndTCRData(
-            collateralToken
+        (collateralToken, price, totalPricedCollateral, totalDebt, isRecoveryMode) = _getCollateralAndTCRData(
+            troveManager
         );
         require(!isRecoveryMode, "BorrowerOps: Operation not permitted during Recovery Mode");
 
@@ -583,34 +597,50 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         return newTCR;
     }
 
-    function _getTroveManagerAndTCRData(
-        IERC20 collateralToken
+    function _getTCRData(
+        SystemBalances memory balances
+    ) internal pure returns (uint256 amount, uint256 totalPricedCollateral, uint256 totalDebt) {
+        uint256 loopEnd = balances.collaterals.length;
+        for (uint256 i; i < loopEnd; ) {
+            totalPricedCollateral += (balances.collaterals[i] * balances.prices[i]);
+            totalDebt += balances.debts[i];
+            unchecked {
+                ++i;
+            }
+        }
+        amount = PrismaMath._computeCR(totalPricedCollateral, totalDebt);
+
+        return (amount, totalPricedCollateral, totalDebt);
+    }
+
+    function _getCollateralAndTCRData(
+        ITroveManager troveManager
     )
         internal
         returns (
-            ITroveManager troveManager,
+            IERC20 collateralToken,
             uint256 price,
             uint256 totalPricedCollateral,
             uint256 totalDebt,
             bool isRecoveryMode
         )
     {
-        TrovesContracts storage t = _trovesContracts[collateralToken];
+        TroveManagerData storage t = troveManagersData[troveManager];
         uint256 index;
-        (troveManager, index) = (t.troveManager, t.index);
+        (collateralToken, index) = (t.collateralToken, t.index);
 
-        require(address(troveManager) != address(0), "Collateral not enabled");
+        require(address(collateralToken) != address(0), "Collateral not enabled");
 
         uint256 amount;
         SystemBalances memory balances = fetchBalances();
-        (amount, totalPricedCollateral, totalDebt) = getTCR(balances);
+        (amount, totalPricedCollateral, totalDebt) = _getTCRData(balances);
         isRecoveryMode = checkRecoveryMode(amount);
 
-        return (troveManager, balances.prices[index], totalPricedCollateral, totalDebt, isRecoveryMode);
+        return (collateralToken, balances.prices[index], totalPricedCollateral, totalDebt, isRecoveryMode);
     }
 
     function getGlobalSystemBalances() external returns (uint256 totalPricedCollateral, uint256 totalDebt) {
         SystemBalances memory balances = fetchBalances();
-        (, totalPricedCollateral, totalDebt) = getTCR(balances);
+        (, totalPricedCollateral, totalDebt) = _getTCRData(balances);
     }
 }

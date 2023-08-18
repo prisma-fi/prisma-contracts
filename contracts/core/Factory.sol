@@ -29,20 +29,19 @@ contract Factory is PrismaOwnable {
     address public sortedTrovesImpl;
     address public troveManagerImpl;
 
-    mapping(address collateral => address troveManager) public collateralTroveManager;
+    address[] public troveManagers;
 
+    // commented values are suggested default parameters
     struct DeploymentParams {
-        uint256 minuteDecayFactor;
-        uint256 redemptionFeeFloor;
-        uint256 maxRedemptionFee;
-        uint256 borrowingFeeFloor;
-        uint256 maxBorrowingFee;
-        uint256 interestRate;
+        uint256 minuteDecayFactor; // 999037758833783000  (half life of 12 hours)
+        uint256 redemptionFeeFloor; // 1e18 / 1000 * 5  (0.5%)
+        uint256 maxRedemptionFee; // 1e18  (100%)
+        uint256 borrowingFeeFloor; // 1e18 / 1000 * 5  (0.5%)
+        uint256 maxBorrowingFee; // 1e18 / 100 * 5  (5%)
+        uint256 interestRateInBps; // 100 (1%)
         uint256 maxDebt;
-        uint256 MCR;
+        uint256 MCR; // 12 * 1e17  (120%)
     }
-
-    error CollateralAlreadyDeployed(address collateral);
 
     event NewDeployment(address collateral, address priceFeed, address troveManager, address sortedTroves);
 
@@ -64,11 +63,17 @@ contract Factory is PrismaOwnable {
         liquidationManager = _liquidationManager;
     }
 
+    function troveManagerCount() external view returns (uint256) {
+        return troveManagers.length;
+    }
+
     /**
         @notice Deploy new instances of `TroveManager` and `SortedTroves`, adding
                 a new collateral type to the system.
-        @dev After calling this function, the owner should also call `Treasury.registerReceiver`
-             to enable PRISMA emissions on the newly deployed `TroveManager`
+        @dev * When using the default `PriceFeed`, ensure it is configured correctly
+               prior to calling this function.
+             * After calling this function, the owner should also call `Vault.registerReceiver`
+               to enable PRISMA emissions on the newly deployed `TroveManager`
         @param collateral Collateral token to use in new deployment
         @param priceFeed Custom `PriceFeed` deployment. Leave as `address(0)` to use the default.
         @param customTroveManagerImpl Custom `TroveManager` implementation to clone from.
@@ -84,22 +89,23 @@ contract Factory is PrismaOwnable {
         address customSortedTrovesImpl,
         DeploymentParams memory params
     ) external onlyOwner {
-        if (collateralTroveManager[collateral] != address(0)) revert CollateralAlreadyDeployed(collateral);
-
         address implementation = customTroveManagerImpl == address(0) ? troveManagerImpl : customTroveManagerImpl;
         address troveManager = implementation.cloneDeterministic(bytes32(bytes20(collateral)));
-        collateralTroveManager[collateral] = troveManager;
+        troveManagers.push(troveManager);
 
         implementation = customSortedTrovesImpl == address(0) ? sortedTrovesImpl : customSortedTrovesImpl;
-        address sortedTroves = implementation.cloneDeterministic(bytes32(bytes20(collateral)));
+        address sortedTroves = implementation.cloneDeterministic(bytes32(bytes20(troveManager)));
 
         ITroveManager(troveManager).setAddresses(priceFeed, sortedTroves, collateral);
         ISortedTroves(sortedTroves).setAddresses(troveManager);
 
+        // verify that the oracle is correctly working
+        ITroveManager(troveManager).fetchPrice();
+
         stabilityPool.enableCollateral(collateral);
-        liquidationManager.enableCollateral(troveManager, collateral);
-        debtToken.enableCollateral(troveManager);
-        borrowerOperations.enableCollateral(troveManager, collateral);
+        liquidationManager.enableTroveManager(troveManager);
+        debtToken.enableTroveManager(troveManager);
+        borrowerOperations.configureCollateral(troveManager, collateral);
 
         ITroveManager(troveManager).setParameters(
             params.minuteDecayFactor,
@@ -107,7 +113,7 @@ contract Factory is PrismaOwnable {
             params.maxRedemptionFee,
             params.borrowingFeeFloor,
             params.maxBorrowingFee,
-            params.interestRate,
+            params.interestRateInBps,
             params.maxDebt,
             params.MCR
         );

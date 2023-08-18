@@ -4,7 +4,7 @@ pragma solidity 0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "../../interfaces/ICurveProxy.sol";
-import "../../interfaces/ITreasury.sol";
+import "../../interfaces/IVault.sol";
 import "../../dependencies/PrismaOwnable.sol";
 
 interface IBooster {
@@ -22,6 +22,12 @@ interface IBaseRewardPool {
     function withdrawAndUnwrap(uint256 amount, bool claim) external returns (bool);
 
     function getReward(address _account, bool _claimExtras) external returns (bool);
+
+    function getReward() external;
+}
+
+interface IConvexStash {
+    function tokenInfo(address _token) external view returns (address token, address rewards);
 }
 
 /**
@@ -37,11 +43,12 @@ contract ConvexDepositToken {
 
     IBooster public immutable booster;
     ICurveProxy public immutable curveProxy;
-    IPrismaTreasury public immutable treasury;
+    IPrismaVault public immutable vault;
 
     IERC20 public lpToken;
     uint256 public depositPid;
     IBaseRewardPool public crvRewards;
+    IBaseRewardPool public cvxRewards;
 
     uint256 public emissionId;
 
@@ -66,7 +73,7 @@ contract ConvexDepositToken {
     uint32 public periodFinish;
 
     mapping(address => uint256[3]) public rewardIntegralFor;
-    mapping(address => uint128[3]) private pendingRewardFor;
+    mapping(address => uint128[3]) private storedPendingReward;
 
     uint256 constant REWARD_DURATION = 1 weeks;
 
@@ -76,31 +83,26 @@ contract ConvexDepositToken {
     event LPTokenWithdrawn(address indexed lpToken, address indexed receiver, uint256 amount);
     event RewardClaimed(address indexed receiver, uint256 prismaAmount, uint256 crvAmount, uint256 cvxAmount);
 
-    constructor(
-        IERC20 _prisma,
-        IERC20 _CRV,
-        IERC20 _CVX,
-        IBooster _booster,
-        ICurveProxy _proxy,
-        IPrismaTreasury _treasury
-    ) {
+    constructor(IERC20 _prisma, IERC20 _CRV, IERC20 _CVX, IBooster _booster, ICurveProxy _proxy, IPrismaVault _vault) {
         PRISMA = _prisma;
         CRV = _CRV;
         CVX = _CVX;
         booster = _booster;
         curveProxy = _proxy;
-        treasury = _treasury;
+        vault = _vault;
     }
 
     function initialize(uint256 pid) external {
         require(address(lpToken) == address(0), "Already initialized");
-        address _lpToken;
-        address _crvRewards;
-        (_lpToken, , , _crvRewards, , ) = booster.poolInfo(pid);
+        (address _lpToken, , , address _crvRewards, address _stash, ) = booster.poolInfo(pid);
 
         depositPid = pid;
         lpToken = IERC20(_lpToken);
         crvRewards = IBaseRewardPool(_crvRewards);
+
+        (, address _rewards) = IConvexStash(_stash).tokenInfo(address(CVX));
+        require(_rewards != address(0), "Pool has no CVX rewards");
+        cvxRewards = IBaseRewardPool(_rewards);
 
         IERC20(_lpToken).approve(address(booster), type(uint256).max);
 
@@ -112,7 +114,7 @@ contract ConvexDepositToken {
     }
 
     function notifyRegisteredId(uint256[] memory assignedIds) external returns (bool) {
-        require(msg.sender == address(treasury));
+        require(msg.sender == address(vault));
         require(emissionId == 0, "Already registered");
         require(assignedIds.length == 1, "Incorrect ID count");
         emissionId = assignedIds[0];
@@ -130,7 +132,9 @@ contract ConvexDepositToken {
         totalSupply = supply + amount;
 
         _updateIntegrals(receiver, balance, supply);
-        if (block.timestamp / 1 weeks >= periodFinish / 1 weeks) _fetchRewards(true);
+        if (block.timestamp / 1 weeks >= periodFinish / 1 weeks) _fetchRewards();
+
+        emit Transfer(address(0), receiver, amount);
         emit LPTokenDeposited(address(lpToken), receiver, amount);
 
         return true;
@@ -143,12 +147,13 @@ contract ConvexDepositToken {
         balanceOf[msg.sender] = balance - amount;
         totalSupply = supply - amount;
 
-        bool claimRewards = block.timestamp / 1 weeks >= periodFinish / 1 weeks;
-        crvRewards.withdrawAndUnwrap(amount, claimRewards);
+        crvRewards.withdrawAndUnwrap(amount, false);
         lpToken.transfer(receiver, amount);
 
         _updateIntegrals(msg.sender, balance, supply);
-        if (claimRewards) _fetchRewards(false);
+        if (block.timestamp / 1 weeks >= periodFinish / 1 weeks) _fetchRewards();
+
+        emit Transfer(msg.sender, address(0), amount);
         emit LPTokenWithdrawn(address(lpToken), receiver, amount);
 
         return true;
@@ -156,8 +161,8 @@ contract ConvexDepositToken {
 
     function _claimReward(address claimant, address receiver) internal returns (uint128[3] memory amounts) {
         _updateIntegrals(claimant, balanceOf[claimant], totalSupply);
-        amounts = pendingRewardFor[claimant];
-        delete pendingRewardFor[claimant];
+        amounts = storedPendingReward[claimant];
+        delete storedPendingReward[claimant];
         lastCrvBalance -= amounts[1];
         lastCvxBalance -= amounts[2];
 
@@ -171,14 +176,14 @@ contract ConvexDepositToken {
         address receiver
     ) external returns (uint256 prismaAmount, uint256 crvAmount, uint256 cvxAmount) {
         uint128[3] memory amounts = _claimReward(msg.sender, receiver);
-        treasury.transferAllocatedTokens(msg.sender, receiver, amounts[0]);
+        vault.transferAllocatedTokens(msg.sender, receiver, amounts[0]);
 
         emit RewardClaimed(receiver, amounts[0], amounts[1], amounts[2]);
         return (amounts[0], amounts[1], amounts[2]);
     }
 
-    function treasuryClaimReward(address claimant, address receiver) external returns (uint256) {
-        require(msg.sender == address(treasury));
+    function vaultClaimReward(address claimant, address receiver) external returns (uint256) {
+        require(msg.sender == address(vault));
         uint128[3] memory amounts = _claimReward(claimant, receiver);
 
         emit RewardClaimed(claimant, 0, amounts[1], amounts[2]);
@@ -201,7 +206,7 @@ contract ConvexDepositToken {
                 integral += (duration * rewardRate[i] * 1e18) / supply;
             }
             uint256 integralFor = rewardIntegralFor[account][i];
-            amounts[i] = pendingRewardFor[account][i] + ((balance * (integral - integralFor)) / 1e18);
+            amounts[i] = storedPendingReward[account][i] + ((balance * (integral - integralFor)) / 1e18);
         }
         return (amounts[0], amounts[1], amounts[2]);
     }
@@ -254,22 +259,23 @@ contract ConvexDepositToken {
             }
             uint256 integralFor = rewardIntegralFor[account][i];
             if (integral > integralFor) {
-                pendingRewardFor[account][i] += uint128((balance * (integral - integralFor)) / 1e18);
+                storedPendingReward[account][i] += uint128((balance * (integral - integralFor)) / 1e18);
                 rewardIntegralFor[account][i] = integral;
             }
         }
     }
 
     function fetchRewards() external {
-        require(block.timestamp / 1 weeks > periodFinish / 1 weeks, "Can only fetch once per week");
-        _fetchRewards(true);
+        require(block.timestamp / 1 weeks >= periodFinish / 1 weeks, "Can only fetch once per week");
+        _fetchRewards();
     }
 
-    function _fetchRewards(bool claim) internal {
+    function _fetchRewards() internal {
         uint256 prismaAmount;
         uint256 id = emissionId;
-        if (id > 0) prismaAmount = treasury.allocateNewEmissions(id);
-        if (claim) crvRewards.getReward(address(this), false);
+        if (id > 0) prismaAmount = vault.allocateNewEmissions(id);
+        crvRewards.getReward(address(this), false);
+        cvxRewards.getReward();
 
         uint256 last = lastCrvBalance;
         uint256 crvAmount = CRV.balanceOf(address(this)) - last;

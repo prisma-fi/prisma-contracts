@@ -76,7 +76,7 @@ contract DebtToken is OFT {
         _CACHED_DOMAIN_SEPARATOR = _buildDomainSeparator(_TYPE_HASH, hashedName, hashedVersion);
     }
 
-    function enableCollateral(address _troveManager) external {
+    function enableTroveManager(address _troveManager) external {
         require(msg.sender == factory, "!Factory");
         troveManager[_troveManager] = true;
     }
@@ -100,31 +100,22 @@ contract DebtToken is OFT {
     }
 
     function mint(address _account, uint256 _amount) external {
-        require(
-            msg.sender == borrowerOperationsAddress || troveManager[msg.sender],
-            "DebtToken: Caller is not BorrowerOperations"
-        );
+        require(msg.sender == borrowerOperationsAddress || troveManager[msg.sender], "Debt: Caller not BO/TM");
         _mint(_account, _amount);
     }
 
     function burn(address _account, uint256 _amount) external {
-        require(
-            troveManager[msg.sender],
-            "Debt: Caller is neither BorrowerOperations nor TroveManager nor StabilityPool"
-        );
+        require(troveManager[msg.sender], "Debt: Caller not TroveManager");
         _burn(_account, _amount);
     }
 
     function sendToSP(address _sender, uint256 _amount) external {
-        require(msg.sender == stabilityPoolAddress, "Debt: Caller is not the StabilityPool");
+        require(msg.sender == stabilityPoolAddress, "Debt: Caller not StabilityPool");
         _transfer(_sender, msg.sender, _amount);
     }
 
     function returnFromPool(address _poolAddress, address _receiver, uint256 _amount) external {
-        require(
-            msg.sender == stabilityPoolAddress || troveManager[msg.sender],
-            "Debt: Caller is neither TroveManager nor StabilityPool"
-        );
+        require(msg.sender == stabilityPoolAddress || troveManager[msg.sender], "Debt: Caller not TM/SP");
         _transfer(_poolAddress, _receiver, _amount);
     }
 

@@ -25,7 +25,7 @@ contract ConvexFactory is PrismaOwnable {
     }
 
     /**
-        @dev After calling this function, the owner should also call `Treasury.registerReceiver`
+        @dev After calling this function, the owner should also call `Vault.registerReceiver`
              to enable PRISMA emissions on the newly deployed `ConvexDepositToken`
      */
     function deployNewInstance(uint256 pid) external onlyOwner {

@@ -8,7 +8,7 @@ import "../dependencies/PrismaOwnable.sol";
 import "../dependencies/SystemStart.sol";
 import "../dependencies/PrismaMath.sol";
 import "../interfaces/IDebtToken.sol";
-import "../interfaces/ITreasury.sol";
+import "../interfaces/IVault.sol";
 
 /**
     @title Prisma Stability Pool
@@ -28,7 +28,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     uint256 public constant emissionId = 0;
 
     IDebtToken public immutable debtToken;
-    IPrismaTreasury public immutable treasury;
+    IPrismaVault public immutable vault;
     address public immutable factory;
     address public immutable liquidationManager;
 
@@ -50,7 +50,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
 
     mapping(address depositor => uint80[256] gains) public collateralGainsByDepositor;
 
-    mapping(address depositor => uint256 rewards) public pendingRewardFor;
+    mapping(address depositor => uint256 rewards) private storedPendingReward;
 
     /*  Product 'P': Running product by which to multiply an initial deposit, in order to find the current compounded deposit,
      * after a series of liquidations have occurred, each of which cancel some debt with the deposit.
@@ -138,12 +138,12 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     constructor(
         address _prismaCore,
         IDebtToken _debtTokenAddress,
-        IPrismaTreasury _treasury,
+        IPrismaVault _vault,
         address _factory,
         address _liquidationManager
     ) PrismaOwnable(_prismaCore) SystemStart(_prismaCore) {
         debtToken = _debtTokenAddress;
-        treasury = _treasury;
+        vault = _vault;
         factory = _factory;
         liquidationManager = _liquidationManager;
         periodFinish = uint32(block.timestamp - 1);
@@ -152,20 +152,29 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     function enableCollateral(IERC20 _collateral) external {
         require(msg.sender == factory, "Not factory");
         uint256 length = collateralTokens.length;
+        bool collateralEnabled;
         for (uint256 i = 0; i < length; i++) {
-            require(collateralTokens[i] != _collateral, "Collateral already in use");
-        }
-        Queue memory queueCached = queue;
-        if (queueCached.nextSunsetIndexKey > queueCached.firstSunsetIndexKey) {
-            SunsetIndex memory sIdx = _sunsetIndexes[queueCached.firstSunsetIndexKey];
-            if (sIdx.expiry < block.timestamp) {
-                delete _sunsetIndexes[queue.firstSunsetIndexKey++];
-                _overwriteCollateral(_collateral, sIdx.idx);
-                return;
+            if (collateralTokens[i] == _collateral) {
+                collateralEnabled = true;
+                break;
             }
         }
-        collateralTokens.push(_collateral);
-        indexByCollateral[_collateral] = collateralTokens.length;
+        if (!collateralEnabled) {
+            Queue memory queueCached = queue;
+            if (queueCached.nextSunsetIndexKey > queueCached.firstSunsetIndexKey) {
+                SunsetIndex memory sIdx = _sunsetIndexes[queueCached.firstSunsetIndexKey];
+                if (sIdx.expiry < block.timestamp) {
+                    delete _sunsetIndexes[queue.firstSunsetIndexKey++];
+                    _overwriteCollateral(_collateral, sIdx.idx);
+                    return;
+                }
+            }
+            collateralTokens.push(_collateral);
+            indexByCollateral[_collateral] = collateralTokens.length;
+        } else {
+            // revert if the factory is trying to deploy a new TM with a sunset collateral
+            require(indexByCollateral[_collateral] > 0, "Collateral is sunsetting");
+        }
     }
 
     function _overwriteCollateral(IERC20 _newCollateral, uint256 idx) internal {
@@ -190,8 +199,16 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         collateralTokens[idx] = _newCollateral;
     }
 
-    function startCollateralSunset(IERC20 collateral) external {
-        require(msg.sender == address(PRISMA_CORE), "Not prisma core");
+    /**
+     * @notice Starts sunsetting a collateral
+     *         During sunsetting liquidated collateral handoff to the SP will revert
+        @dev IMPORTANT: When sunsetting a collateral, `TroveManager.startSunset`
+                        should be called on all TM linked to that collateral
+        @param collateral Collateral to sunset
+
+     */
+    function startCollateralSunset(IERC20 collateral) external onlyOwner {
+        require(indexByCollateral[collateral] > 0, "Collateral already sunsetting");
         _sunsetIndexes[queue.nextSunsetIndexKey++] = SunsetIndex(
             uint128(indexByCollateral[collateral] - 1),
             uint128(block.timestamp + SUNSET_DURATION)
@@ -223,7 +240,6 @@ contract StabilityPool is PrismaOwnable, SystemStart {
 
         uint256 compoundedDebtDeposit = getCompoundedDebtDeposit(msg.sender);
 
-        // First pay out any rewardToken gains
         _accrueRewards(msg.sender);
 
         debtToken.sendToSP(msg.sender, _amount);
@@ -264,7 +280,6 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         uint256 compoundedDebtDeposit = getCompoundedDebtDeposit(msg.sender);
         uint256 debtToWithdraw = PrismaMath._min(_amount, compoundedDebtDeposit);
 
-        // First pay out any rewardToken gains
         _accrueRewards(msg.sender);
 
         if (debtToWithdraw > 0) {
@@ -283,14 +298,13 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     // --- Prisma issuance functions ---
 
     function _triggerRewardIssuance() internal {
-        uint256 issuance = _vestedEmissions();
-        _updateG(issuance);
+        _updateG(_vestedEmissions());
 
         uint256 _periodFinish = periodFinish;
         uint256 lastUpdateWeek = (_periodFinish - startTime) / 1 weeks;
         // If the last claim was a week earlier we reclaim
         if (getWeek() >= lastUpdateWeek) {
-            uint256 amount = treasury.allocateNewEmissions(emissionId);
+            uint256 amount = vault.allocateNewEmissions(emissionId);
             if (amount > 0) {
                 // If the previous period is not finished we combine new and pending old rewards
                 if (block.timestamp < _periodFinish) {
@@ -309,8 +323,9 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         // Period is not ended we max at current timestamp
         if (updated > block.timestamp) updated = block.timestamp;
         // if the last update was after the current update time it means all rewards have been vested already
-        if (lastUpdate >= updated) return 0; //Nothing to claim
-        uint256 duration = updated - lastUpdate;
+        uint256 lastUpdateCached = lastUpdate;
+        if (lastUpdateCached >= updated) return 0; //Nothing to claim
+        uint256 duration = updated - lastUpdateCached;
         return duration * rewardRate;
     }
 
@@ -318,7 +333,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         uint256 totalDebt = totalDebtTokenDeposits; // cached to save an SLOAD
         /*
          * When total deposits is 0, G is not updated. In this case, the Prisma issued can not be obtained by later
-         * depositors - it is missed out on, and remains in the balanceof the CommunityIssuance contract.
+         * depositors - it is missed out on, and remains in the balanceof the Treasury contract.
          *
          */
         if (totalDebt == 0 || _prismaIssuance == 0) {
@@ -327,11 +342,13 @@ contract StabilityPool is PrismaOwnable, SystemStart {
 
         uint256 prismaPerUnitStaked;
         prismaPerUnitStaked = _computePrismaPerUnitStaked(_prismaIssuance, totalDebt);
-
+        uint128 currentEpochCached = currentEpoch;
+        uint128 currentScaleCached = currentScale;
         uint256 marginalPrismaGain = prismaPerUnitStaked * P;
-        epochToScaleToG[currentEpoch][currentScale] = epochToScaleToG[currentEpoch][currentScale] + marginalPrismaGain;
+        uint256 newG = epochToScaleToG[currentEpochCached][currentScaleCached] + marginalPrismaGain;
+        epochToScaleToG[currentEpochCached][currentScaleCached] = newG;
 
-        emit G_Updated(epochToScaleToG[currentEpoch][currentScale], currentEpoch, currentScale);
+        emit G_Updated(newG, currentEpochCached, currentScaleCached);
     }
 
     function _computePrismaPerUnitStaked(
@@ -477,6 +494,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
             newP = (currentP * newProductFactor) / DECIMAL_PRECISION;
         }
 
+        require(newP > 0, "NewP");
         P = newP;
         emit P_Updated(newP);
     }
@@ -495,14 +513,14 @@ contract StabilityPool is PrismaOwnable, SystemStart {
      * d0 is the last recorded deposit value.
      */
     function getDepositorCollateralGain(address _depositor) external view returns (uint256[] memory collateralGains) {
-        uint80[256] storage depositorGains = collateralGainsByDepositor[_depositor];
         collateralGains = new uint256[](collateralTokens.length);
-        uint256 initialDeposit = accountDeposits[_depositor].amount;
 
-        uint128 epochSnapshot = depositSnapshots[_depositor].epoch;
-        uint128 scaleSnapshot = depositSnapshots[_depositor].scale;
         uint256 P_Snapshot = depositSnapshots[_depositor].P;
         if (P_Snapshot == 0) return collateralGains;
+        uint80[256] storage depositorGains = collateralGainsByDepositor[_depositor];
+        uint256 initialDeposit = accountDeposits[_depositor].amount;
+        uint128 epochSnapshot = depositSnapshots[_depositor].epoch;
+        uint128 scaleSnapshot = depositSnapshots[_depositor].scale;
         uint256[256] storage sums = epochToScaleToSums[epochSnapshot][scaleSnapshot];
         uint256[256] storage nextSums = epochToScaleToSums[epochSnapshot][scaleSnapshot + 1];
         uint256[256] storage depSums = depositSums[_depositor];
@@ -742,48 +760,48 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     //This assumes the snapshot gets updated in the caller
     function _accrueRewards(address _depositor) internal {
         uint256 amount = _claimableReward(_depositor);
-        pendingRewardFor[_depositor] = pendingRewardFor[_depositor] + amount;
+        storedPendingReward[_depositor] = storedPendingReward[_depositor] + amount;
     }
 
     function claimReward(address recipient) external returns (uint256 amount) {
         amount = _claimReward(msg.sender);
         if (amount > 0) {
-            treasury.transferAllocatedTokens(msg.sender, recipient, amount);
+            vault.transferAllocatedTokens(msg.sender, recipient, amount);
         }
         emit RewardClaimed(msg.sender, recipient, amount);
         return amount;
     }
 
-    function treasuryClaimReward(address claimant, address) external returns (uint256 amount) {
-        require(msg.sender == address(treasury));
+    function vaultClaimReward(address claimant, address) external returns (uint256 amount) {
+        require(msg.sender == address(vault));
 
         return _claimReward(claimant);
     }
 
     function _claimReward(address account) internal returns (uint256 amount) {
         uint256 initialDeposit = accountDeposits[account].amount;
-        uint128 depositTimestamp = accountDeposits[account].timestamp;
-        require(initialDeposit > 0, "StabilityPool: User must have a non-zero deposit");
 
-        _triggerRewardIssuance();
+        if (initialDeposit > 0) {
+            uint128 depositTimestamp = accountDeposits[account].timestamp;
+            _triggerRewardIssuance();
+            bool hasGains = _accrueDepositorCollateralGain(account);
 
-        bool hasGains = _accrueDepositorCollateralGain(account);
+            uint256 compoundedDebtDeposit = getCompoundedDebtDeposit(account);
+            uint256 debtLoss = initialDeposit - compoundedDebtDeposit;
 
-        uint256 compoundedDebtDeposit = getCompoundedDebtDeposit(account);
-        uint256 debtLoss = initialDeposit - compoundedDebtDeposit; // Needed only for event log
-
-        amount = _claimableReward(account);
-        // we update only if the snapshot has changed
-        if (debtLoss > 0 || hasGains || amount > 0) {
-            // Update deposit
-            uint256 newDeposit = compoundedDebtDeposit;
-            accountDeposits[account] = AccountDeposit({ amount: uint128(newDeposit), timestamp: depositTimestamp });
-            _updateSnapshots(account, newDeposit);
+            amount = _claimableReward(account);
+            // we update only if the snapshot has changed
+            if (debtLoss > 0 || hasGains || amount > 0) {
+                // Update deposit
+                uint256 newDeposit = compoundedDebtDeposit;
+                accountDeposits[account] = AccountDeposit({ amount: uint128(newDeposit), timestamp: depositTimestamp });
+                _updateSnapshots(account, newDeposit);
+            }
         }
-        uint256 pending = pendingRewardFor[account];
+        uint256 pending = storedPendingReward[account];
         if (pending > 0) {
             amount += pending;
-            pendingRewardFor[account] = 0;
+            storedPendingReward[account] = 0;
         }
         return amount;
     }

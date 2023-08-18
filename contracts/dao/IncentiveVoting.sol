@@ -19,7 +19,7 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
     uint256 public constant MAX_LOCK_WEEKS = 52; // must be the same as `MultiLocker`
 
     ITokenLocker public immutable tokenLocker;
-    address public immutable treasury;
+    address public immutable vault;
 
     struct AccountData {
         // system week when the account's lock weights were registered
@@ -83,9 +83,9 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
     // emitted each time the votes for `account` are cleared
     event ClearedVotes(address indexed account, uint256 indexed week);
 
-    constructor(address _prismaCore, ITokenLocker _tokenLocker, address _treasury) SystemStart(_prismaCore) {
+    constructor(address _prismaCore, ITokenLocker _tokenLocker, address _vault) SystemStart(_prismaCore) {
         tokenLocker = _tokenLocker;
-        treasury = _treasury;
+        vault = _vault;
     }
 
     function getAccountRegisteredLocks(
@@ -207,7 +207,7 @@ contract IncentiveVoting is DelegatedOps, SystemStart {
     }
 
     function registerNewReceiver() external returns (uint256) {
-        require(msg.sender == treasury, "Not Treasury");
+        require(msg.sender == vault, "Not Treasury");
         uint256 id = receiverCount;
         receiverUpdatedWeek[id] = uint16(getWeek());
         receiverCount = id + 1;

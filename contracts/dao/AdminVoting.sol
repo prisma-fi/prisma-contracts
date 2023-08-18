@@ -16,7 +16,14 @@ import "../interfaces/ITokenLocker.sol";
 contract AdminVoting is DelegatedOps, SystemStart {
     using Address for address;
 
-    event ProposalCreated(address indexed account, Action[] payload, uint256 week, uint256 requiredWeight);
+    event ProposalCreated(
+        address indexed account,
+        uint256 proposalId,
+        Action[] payload,
+        uint256 week,
+        uint256 requiredWeight
+    );
+    event ProposalHasMetQuorum(uint256 id, uint256 canExecuteAfter);
     event ProposalExecuted(uint256 proposalId);
     event ProposalCancelled(uint256 proposalId);
     event VoteCast(
@@ -26,13 +33,13 @@ contract AdminVoting is DelegatedOps, SystemStart {
         uint256 proposalCurrentWeight,
         bool hasPassed
     );
-    event ProposalCreationMinWeightSet(uint256 weight);
+    event ProposalCreationMinPctSet(uint256 weight);
     event ProposalPassingPctSet(uint256 pct);
 
     struct Proposal {
         uint16 week; // week which vote weights are based upon
         uint32 createdAt; // timestamp when the proposal was created
-        uint32 canExecuteAfter;
+        uint32 canExecuteAfter; // earliest timestamp when proposal can be executed (0 if not passed)
         uint40 currentWeight; //  amount of weight currently voting in favor
         uint40 requiredWeight; // amount of weight required for the proposal to be executed
         bool processed; // set to true once the proposal is processed
@@ -43,11 +50,12 @@ contract AdminVoting is DelegatedOps, SystemStart {
         bytes data;
     }
 
+    uint256 public constant BOOTSTRAP_PERIOD = 30 days;
     uint256 public constant VOTING_PERIOD = 1 weeks;
     uint256 public constant MIN_TIME_TO_EXECUTION = 1 days;
     uint256 public constant MAX_TIME_TO_EXECUTION = 3 weeks;
     uint256 public constant MIN_TIME_BETWEEN_PROPOSALS = 1 weeks;
-    uint256 public constant SET_GUARDIAN_PASSING_PCT = 51;
+    uint256 public constant SET_GUARDIAN_PASSING_PCT = 5010;
 
     ITokenLocker public immutable tokenLocker;
     IPrismaCore public immutable prismaCore;
@@ -60,21 +68,23 @@ contract AdminVoting is DelegatedOps, SystemStart {
 
     mapping(address account => uint256 timestamp) public latestProposalTimestamp;
 
-    // absolute amount of weight required to create a new proposal
-    uint256 public minCreateProposalWeight;
+    // percentages are expressed as a whole number out of `MAX_PCT`
+    uint256 public constant MAX_PCT = 10000;
+    // percent of total weight required to create a new proposal
+    uint256 public minCreateProposalPct;
     // percent of total weight that must vote for a proposal before it can be executed
     uint256 public passingPct;
 
     constructor(
         address _prismaCore,
         ITokenLocker _tokenLocker,
-        uint256 _minCreateProposalWeight,
+        uint256 _minCreateProposalPct,
         uint256 _passingPct
     ) SystemStart(_prismaCore) {
         tokenLocker = _tokenLocker;
         prismaCore = IPrismaCore(_prismaCore);
 
-        minCreateProposalWeight = _minCreateProposalWeight;
+        minCreateProposalPct = _minCreateProposalPct;
         passingPct = _passingPct;
     }
 
@@ -83,6 +93,15 @@ contract AdminVoting is DelegatedOps, SystemStart {
      */
     function getProposalCount() external view returns (uint256) {
         return proposalData.length;
+    }
+
+    function minCreateProposalWeight() public view returns (uint256) {
+        uint256 week = getWeek();
+        if (week == 0) return 0;
+        week -= 1;
+
+        uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
+        return (totalWeight * minCreateProposalPct) / MAX_PCT;
     }
 
     /**
@@ -142,16 +161,19 @@ contract AdminVoting is DelegatedOps, SystemStart {
         week -= 1;
 
         uint256 accountWeight = tokenLocker.getAccountWeightAt(account, week);
-        require(accountWeight >= minCreateProposalWeight, "Not enough weight to propose");
+        require(accountWeight >= minCreateProposalWeight(), "Not enough weight to propose");
 
         // if the only action is `prismaCore.setGuardian()`, use
         // `SET_GUARDIAN_PASSING_PCT` instead of `passingPct`
         uint256 _passingPct;
-        if (_isSetGuardianPayload(payload.length, payload[0])) _passingPct = SET_GUARDIAN_PASSING_PCT;
-        else _passingPct = passingPct;
+        bool isSetGuardianPayload = _isSetGuardianPayload(payload.length, payload[0]);
+        if (isSetGuardianPayload) {
+            require(block.timestamp > startTime + BOOTSTRAP_PERIOD, "Cannot change guardian during bootstrap");
+            _passingPct = SET_GUARDIAN_PASSING_PCT;
+        } else _passingPct = passingPct;
 
         uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
-        uint40 requiredWeight = uint40((totalWeight * _passingPct) / 100);
+        uint40 requiredWeight = uint40((totalWeight * _passingPct) / MAX_PCT);
         uint256 idx = proposalData.length;
         proposalData.push(
             Proposal({
@@ -168,7 +190,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
             proposalPayloads[idx].push(payload[i]);
         }
         latestProposalTimestamp[account] = block.timestamp;
-        emit ProposalCreated(account, payload, week, requiredWeight);
+        emit ProposalCreated(account, idx, payload, week, requiredWeight);
     }
 
     /**
@@ -201,7 +223,9 @@ contract AdminVoting is DelegatedOps, SystemStart {
         bool hasPassed = updatedWeight >= proposal.requiredWeight;
 
         if (proposal.canExecuteAfter == 0 && hasPassed) {
-            proposalData[id].canExecuteAfter = uint32(block.timestamp + MIN_TIME_TO_EXECUTION);
+            uint256 canExecuteAfter = block.timestamp + MIN_TIME_TO_EXECUTION;
+            proposalData[id].canExecuteAfter = uint32(canExecuteAfter);
+            emit ProposalHasMetQuorum(id, canExecuteAfter);
         }
 
         emit VoteCast(account, id, weight, updatedWeight, hasPassed);
@@ -253,14 +277,15 @@ contract AdminVoting is DelegatedOps, SystemStart {
     }
 
     /**
-        @notice Set the minimum absolute weight required to create a new proposal
+        @notice Set the minimum % of the total weight required to create a new proposal
         @dev Only callable via a passing proposal that includes a call
              to this contract and function within it's payload
      */
-    function setMinCreateProposalWeight(uint256 weight) external returns (bool) {
+    function setMinCreateProposalPct(uint256 pct) external returns (bool) {
         require(msg.sender == address(this), "Only callable via proposal");
-        minCreateProposalWeight = weight;
-        emit ProposalCreationMinWeightSet(weight);
+        require(pct <= MAX_PCT, "Invalid value");
+        minCreateProposalPct = pct;
+        emit ProposalCreationMinPctSet(pct);
         return true;
     }
 
@@ -272,7 +297,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
      */
     function setPassingPct(uint256 pct) external returns (bool) {
         require(msg.sender == address(this), "Only callable via proposal");
-        require(pct <= 100, "Invalid value");
+        require(pct <= MAX_PCT, "Invalid value");
         passingPct = pct;
         emit ProposalPassingPctSet(pct);
         return true;

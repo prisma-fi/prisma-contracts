@@ -2,6 +2,7 @@
 
 pragma solidity 0.8.19;
 
+import "../dependencies/PrismaOwnable.sol";
 import "../dependencies/SystemStart.sol";
 import "../interfaces/IPrismaCore.sol";
 import "../interfaces/IIncentiveVoting.sol";
@@ -13,7 +14,7 @@ import "../interfaces/IPrismaToken.sol";
             which is used within `AdminVoting` and `IncentiveVoting` to vote on
             core protocol operations.
  */
-contract TokenLocker is SystemStart {
+contract TokenLocker is PrismaOwnable, SystemStart {
     // The maximum number of weeks that tokens may be locked for. Also determines the maximum
     // number of active locks that a single account may open. Weight is calculated as:
     // `[balance] * [weeks to unlock]`. Weights are stored as `uint40` and balances as `uint32`,
@@ -32,6 +33,10 @@ contract TokenLocker is SystemStart {
     IPrismaToken public immutable lockToken;
     IIncentiveVoting public immutable incentiveVoter;
     IPrismaCore public immutable prismaCore;
+    address public immutable deploymentManager;
+
+    bool public penaltyWithdrawalsEnabled;
+    uint256 public allowPenaltyWithdrawAfter;
 
     struct AccountData {
         // Currently locked balance. Each week the lock weight decays by this amount.
@@ -95,11 +100,13 @@ contract TokenLocker is SystemStart {
         address _prismaCore,
         IPrismaToken _token,
         IIncentiveVoting _voter,
+        address _manager,
         uint256 _lockToTokenRatio
-    ) SystemStart(_prismaCore) {
+    ) SystemStart(_prismaCore) PrismaOwnable(_prismaCore) {
         lockToken = _token;
         incentiveVoter = _voter;
         prismaCore = IPrismaCore(_prismaCore);
+        deploymentManager = _manager;
 
         lockToTokenRatio = _lockToTokenRatio;
     }
@@ -107,6 +114,24 @@ contract TokenLocker is SystemStart {
     modifier notFrozen(address account) {
         require(accountLockData[account].frozen == 0, "Lock is frozen");
         _;
+    }
+
+    function setAllowPenaltyWithdrawAfter(uint256 _timestamp) external returns (bool) {
+        require(msg.sender == deploymentManager, "!deploymentManager");
+        require(allowPenaltyWithdrawAfter == 0, "Already set");
+        require(_timestamp > block.timestamp && _timestamp < block.timestamp + 13 weeks, "Invalid timestamp");
+        allowPenaltyWithdrawAfter = _timestamp;
+        return true;
+    }
+
+    /**
+        @notice Allow or disallow early-exit of locks by paying a penalty
+     */
+    function setPenaltyWithdrawalsEnabled(bool _enabled) external onlyOwner returns (bool) {
+        uint256 start = allowPenaltyWithdrawAfter;
+        require(start != 0 && block.timestamp > start, "Not yet!");
+        penaltyWithdrawalsEnabled = _enabled;
+        return true;
     }
 
     /**
@@ -170,11 +195,6 @@ contract TokenLocker is SystemStart {
         uint256 locked = accountData.locked;
         uint256 weight = weeklyWeights[accountWeek];
         if (locked == 0 || accountData.frozen > 0) {
-            return weight;
-        }
-
-        uint256 systemWeek = getWeek();
-        if (accountWeek >= systemWeek) {
             return weight;
         }
 
@@ -778,6 +798,7 @@ contract TokenLocker is SystemStart {
         @return uint256 Amount of tokens withdrawn
      */
     function withdrawWithPenalty(uint256 amountToWithdraw) external notFrozen(msg.sender) returns (uint256) {
+        require(penaltyWithdrawalsEnabled, "Penalty withdrawals are disabled");
         AccountData storage accountData = accountLockData[msg.sender];
         uint32[65535] storage unlocks = accountWeeklyUnlocks[msg.sender];
         uint256 weight = _weeklyWeightWrite(msg.sender);
@@ -901,7 +922,6 @@ contract TokenLocker is SystemStart {
         uint256 unlocked;
         uint256 bitfield = accountData.updateWeeks[accountWeek / 256] >> (accountWeek % 256);
 
-        systemWeek;
         while (accountWeek < systemWeek) {
             accountWeek++;
             weight -= locked;

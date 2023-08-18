@@ -61,9 +61,9 @@ contract BoostCalculator is SystemStart {
     mapping(address account => uint32[65535]) accountWeeklyLockPct;
 
     constructor(address _prismaCore, ITokenLocker _locker, uint256 _graceWeeks) SystemStart(_prismaCore) {
-        require(_graceWeeks > 0);
+        require(_graceWeeks > 0, "Grace weeks cannot be 0");
         locker = _locker;
-        MAX_BOOST_GRACE_WEEKS = _graceWeeks;
+        MAX_BOOST_GRACE_WEEKS = _graceWeeks + getWeek();
     }
 
     /**

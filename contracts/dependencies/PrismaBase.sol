@@ -8,7 +8,6 @@ pragma solidity 0.8.19;
  */
 contract PrismaBase {
     uint256 public constant DECIMAL_PRECISION = 1e18;
-    uint256 public constant _100pct = 1000000000000000000; // 1e18 == 100%
 
     // Critical system collateral ratio. If the system's total collateral ratio (TCR) falls below the CCR, Recovery Mode is triggered.
     uint256 public constant CCR = 1500000000000000000; // 150%
