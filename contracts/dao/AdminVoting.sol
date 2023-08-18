@@ -109,7 +109,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         canExecute = (!proposal.processed &&
             proposal.currentWeight >= proposal.requiredWeight &&
             proposal.canExecuteAfter < block.timestamp &&
-            proposal.canExecuteAfter + MAX_TIME_TO_EXECUTION < block.timestamp);
+            proposal.canExecuteAfter + MAX_TIME_TO_EXECUTION > block.timestamp);
 
         return (
             proposal.week,
