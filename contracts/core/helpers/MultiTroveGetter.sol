@@ -17,18 +17,13 @@ contract MultiTroveGetter {
         uint256 snapshotDebt;
     }
 
-    IFactory public immutable factory;
-
-    constructor(IFactory _factory) {
-        factory = _factory;
-    }
+    constructor() {}
 
     function getMultipleSortedTroves(
-        address collateral,
+        ITroveManager troveManager,
         int _startIdx,
         uint256 _count
     ) external view returns (CombinedTroveData[] memory _troves) {
-        ITroveManager troveManager = ITroveManager(factory.collateralTroveManager(collateral));
         ISortedTroves sortedTroves = ISortedTroves(troveManager.sortedTroves());
         uint256 startIdx;
         bool descend;

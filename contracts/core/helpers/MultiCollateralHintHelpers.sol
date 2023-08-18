@@ -10,16 +10,10 @@ import "../../dependencies/PrismaBase.sol";
 import "../../dependencies/PrismaMath.sol";
 
 contract MultiCollateralHintHelpers is PrismaBase {
-    IFactory public immutable factory;
     IBorrowerOperations public immutable borrowerOperations;
 
-    constructor(
-        address _borrowerOperationsAddress,
-        address _factory,
-        uint256 _gasCompensation
-    ) PrismaBase(_gasCompensation) {
+    constructor(address _borrowerOperationsAddress, uint256 _gasCompensation) PrismaBase(_gasCompensation) {
         borrowerOperations = IBorrowerOperations(_borrowerOperationsAddress);
-        factory = IFactory(_factory);
     }
 
     // --- Functions ---
@@ -42,7 +36,7 @@ contract MultiCollateralHintHelpers is PrismaBase {
      */
 
     function getRedemptionHints(
-        address collateral,
+        ITroveManager troveManager,
         uint256 _debtAmount,
         uint256 _price,
         uint256 _maxIterations
@@ -51,7 +45,6 @@ contract MultiCollateralHintHelpers is PrismaBase {
         view
         returns (address firstRedemptionHint, uint256 partialRedemptionHintNICR, uint256 truncatedDebtAmount)
     {
-        ITroveManager troveManager = ITroveManager(factory.collateralTroveManager(collateral));
         ISortedTroves sortedTrovesCached = ISortedTroves(troveManager.sortedTroves());
 
         uint256 remainingDebt = _debtAmount;
@@ -106,12 +99,11 @@ contract MultiCollateralHintHelpers is PrismaBase {
     be <= sqrt(length) positions away from the correct insert position.
     */
     function getApproxHint(
-        address collateral,
+        ITroveManager troveManager,
         uint256 _CR,
         uint256 _numTrials,
         uint256 _inputRandomSeed
     ) external view returns (address hintAddress, uint256 diff, uint256 latestRandomSeed) {
-        ITroveManager troveManager = ITroveManager(factory.collateralTroveManager(collateral));
         ISortedTroves sortedTroves = ISortedTroves(troveManager.sortedTroves());
         uint256 arrayLength = troveManager.getTroveOwnersCount();
 
