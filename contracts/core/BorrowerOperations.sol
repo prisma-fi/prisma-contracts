@@ -231,7 +231,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         emit TroveCreated(account, vars.arrayIndex);
 
         // Move the collateral to the Trove Manager
-        collateralToken.transferFrom(msg.sender, address(troveManager), _collateralAmount);
+        collateralToken.safeTransferFrom(msg.sender, address(troveManager), _collateralAmount);
 
         //  and mint the DebtAmount to the caller and gas compensation for Gas Pool
         debtToken.mintWithGasCompensation(msg.sender, _debtAmount);
