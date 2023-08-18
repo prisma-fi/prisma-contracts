@@ -1,97 +1,99 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.19;
+pragma solidity ^0.8.0;
 
-/*
- * The Stability Pool holds Debt tokens deposited by Stability Pool depositors.
- *
- * When a trove is liquidated, then depending on system conditions, some of its Debt debt gets offset with
- * Debt in the Stability Pool:  that is, the offset debt evaporates, and an equal amount of Debt tokens in the Stability Pool is burned.
- *
- * Thus, a liquidation causes each depositor to receive a Debt loss, in proportion to their deposit as a share of total deposits.
- * They also receive a collateral gain, as the collateral of the liquidated trove is distributed among Stability depositors,
- * in the same proportion.
- *
- * When a liquidation occurs, it depletes every deposit by the same fraction: for example, a liquidation that depletes 40%
- * of the total Debt in the Stability Pool, depletes 40% of each deposit.
- *
- * A deposit that has experienced a series of liquidations is termed a "compounded deposit": each liquidation depletes the deposit,
- * multiplying it by some factor in range ]0,1[
- *
- * Please see the implementation spec in the proof document, which closely follows on from the compounded deposit / collateral gain derivations:
- * https://github.com/liquity/liquity/blob/master/papers/Scalable_Reward_Distribution_with_Compounding_Stakes.pdf
- *
- * --- Prisma ISSUANCE TO STABILITY POOL DEPOSITORS ---
- *
- * An Prisma issuance event occurs at every deposit operation, and every liquidation.
- *
- * Each deposit is tagged with the address of the front end through which it was made.
- *
- * All deposits earn a share of the issued Prisma in proportion to the deposit as a share of total deposits. The Prisma earned
- * by a given deposit, is split between the depositor and the front end through which the deposit was made, based on the front end's kickbackRate.
- *
- * Please see the system Readme for an overview:
- * https://github.com/liquity/dev/blob/main/README.md#lqty-issuance-to-stability-providers
- */
 interface IStabilityPool {
-    // --- Functions ---
+    event CollateralGainWithdrawn(address indexed _depositor, uint256[] _collateral);
+    event CollateralOverwritten(address oldCollateral, address newCollateral);
+    event DepositSnapshotUpdated(address indexed _depositor, uint256 _P, uint256 _G);
+    event EpochUpdated(uint128 _currentEpoch);
+    event G_Updated(uint256 _G, uint128 _epoch, uint128 _scale);
+    event P_Updated(uint256 _P);
+    event RewardClaimed(address indexed account, address indexed recipient, uint256 claimed);
+    event S_Updated(uint256 idx, uint256 _S, uint128 _epoch, uint128 _scale);
+    event ScaleUpdated(uint128 _currentScale);
+    event StabilityPoolDebtBalanceUpdated(uint256 _newBalance);
+    event UserDepositChanged(address indexed _depositor, uint256 _newDeposit);
 
-    /*
-     * Initial checks:
-     * - Frontend is registered or zero address
-     * - Sender is not a registered frontend
-     * - _amount is not zero
-     * ---
-     * - Triggers a Prisma issuance, based on time passed since the last issuance. The Prisma issuance is shared between *all* depositors
-     * - Tags the deposit with the provided front end tag param, if it's a new deposit
-     * - Accrue depositor's accumulated gains (Prisma, collateral)
-     * - Increases deposit's stake, and takes a new snapshot.
-     */
-    function provideToSP(uint _amount) external;
+    function claimCollateralGains(address recipient, uint256[] calldata collateralIndexes) external;
 
-    /*
-     * Initial checks:
-     * - _amount is zero or there are no under collateralized troves left in the system
-     * - User has a non zero deposit
-     * ---
-     * - Triggers a Prisma issuance, based on time passed since the last issuance. The Prisma issuance is shared between *all* depositors and front ends
-     * - Accrue all depositor's accumulated gains (Prisma, collateral)
-     * - Decreases deposit's stake, and takes a new snapshot.
-     *
-     * If _amount > userDeposit, the user withdraws all of their compounded deposit.
-     */
-    function withdrawFromSP(uint _amount) external;
+    function claimReward(address recipient) external returns (uint256 amount);
 
-    /*
-     * Initial checks:
-     * - Caller is LiquidationManager
-     * ---
-     * Cancels out the specified debt against the Debt contained in the Stability Pool (as far as possible)
-     * Only called by liquidation functions in the LiquidationManager.
-     */
-    function offset(address collateral, uint _debt, uint _coll) external;
+    function enableCollateral(address _collateral) external;
 
-    /*
-     * Returns Debt held in the pool. Changes when users deposit/withdraw, and when Trove debt is offset.
-     */
-    function getTotalDebtTokenDeposits() external view returns (uint);
+    function offset(address collateral, uint256 _debtToOffset, uint256 _collToAdd) external;
 
-    /*
-     * Calculates the collateral gain earned by the deposit since its last snapshots were taken.
-     */
-    function getDepositorCollateralGain(address _depositor) external view returns (uint[] memory collateralGains);
-
-    /*
-     * Calculate the Prisma gain earned by a deposit since its last snapshots were taken.
-     */
-    function getDepositorPrismaGain(address _depositor) external view returns (uint);
-
-    /*
-     * Return the user's compounded deposit.
-     */
-    function getCompoundedDebtDeposit(address _depositor) external view returns (uint);
-
-    function enableCollateral(address collateral) external;
+    function provideToSP(uint256 _amount) external;
 
     function startCollateralSunset(address collateral) external;
+
+    function vaultClaimReward(address claimant, address) external returns (uint256 amount);
+
+    function withdrawFromSP(uint256 _amount) external;
+
+    function DECIMAL_PRECISION() external view returns (uint256);
+
+    function P() external view returns (uint256);
+
+    function PRISMA_CORE() external view returns (address);
+
+    function SCALE_FACTOR() external view returns (uint256);
+
+    function SUNSET_DURATION() external view returns (uint128);
+
+    function accountDeposits(address) external view returns (uint128 amount, uint128 timestamp);
+
+    function claimableReward(address _depositor) external view returns (uint256);
+
+    function collateralGainsByDepositor(address depositor, uint256) external view returns (uint80 gains);
+
+    function collateralTokens(uint256) external view returns (address);
+
+    function currentEpoch() external view returns (uint128);
+
+    function currentScale() external view returns (uint128);
+
+    function debtToken() external view returns (address);
+
+    function depositSnapshots(address) external view returns (uint256 P, uint256 G, uint128 scale, uint128 epoch);
+
+    function depositSums(address, uint256) external view returns (uint256);
+
+    function emissionId() external view returns (uint256);
+
+    function epochToScaleToG(uint128, uint128) external view returns (uint256);
+
+    function epochToScaleToSums(uint128, uint128, uint256) external view returns (uint256);
+
+    function factory() external view returns (address);
+
+    function getCompoundedDebtDeposit(address _depositor) external view returns (uint256);
+
+    function getDepositorCollateralGain(address _depositor) external view returns (uint256[] memory collateralGains);
+
+    function getTotalDebtTokenDeposits() external view returns (uint256);
+
+    function getWeek() external view returns (uint256 week);
+
+    function guardian() external view returns (address);
+
+    function indexByCollateral(address collateral) external view returns (uint256 index);
+
+    function lastCollateralError_Offset() external view returns (uint256);
+
+    function lastDebtLossError_Offset() external view returns (uint256);
+
+    function lastPrismaError() external view returns (uint256);
+
+    function lastUpdate() external view returns (uint32);
+
+    function liquidationManager() external view returns (address);
+
+    function owner() external view returns (address);
+
+    function periodFinish() external view returns (uint32);
+
+    function rewardRate() external view returns (uint128);
+
+    function vault() external view returns (address);
 }

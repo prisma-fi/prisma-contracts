@@ -1,25 +1,31 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.19;
+pragma solidity ^0.8.0;
 
 interface IBoostCalculator {
-    function getBoostedAmount(
-        address account,
-        uint amount,
-        uint previousAmount,
-        uint totalWeeklyEmissions
-    ) external view returns (uint adjustedAmount);
-
     function getBoostedAmountWrite(
         address account,
-        uint amount,
-        uint previousAmount,
-        uint totalWeeklyEmissions
-    ) external returns (uint adjustedAmount);
+        uint256 amount,
+        uint256 previousAmount,
+        uint256 totalWeeklyEmissions
+    ) external returns (uint256 adjustedAmount);
+
+    function MAX_BOOST_GRACE_WEEKS() external view returns (uint256);
+
+    function getBoostedAmount(
+        address account,
+        uint256 amount,
+        uint256 previousAmount,
+        uint256 totalWeeklyEmissions
+    ) external view returns (uint256 adjustedAmount);
 
     function getClaimableWithBoost(
         address claimant,
-        uint previousAmount,
-        uint totalWeeklyEmissions
-    ) external view returns (uint, uint);
+        uint256 previousAmount,
+        uint256 totalWeeklyEmissions
+    ) external view returns (uint256 maxBoosted, uint256 boosted);
+
+    function getWeek() external view returns (uint256 week);
+
+    function locker() external view returns (address);
 }

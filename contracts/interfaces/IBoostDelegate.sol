@@ -4,7 +4,7 @@ pragma solidity 0.8.19;
 
 /**
     @title Prisma Boost Delegate Interface
-    @notice When enabling boost delegation via `Treasury.setBoostDelegationParams`,
+    @notice When enabling boost delegation via `Vault.setBoostDelegationParams`,
             you may optionally set a `callback` contract. If set, it should adhere
             to the following interface.
  */
@@ -23,6 +23,7 @@ interface IBoostDelegate {
      */
     function getFeePct(
         address claimant,
+        address receiver,
         uint amount,
         uint previousAmount,
         uint totalWeeklyEmissions
@@ -41,6 +42,7 @@ interface IBoostDelegate {
      */
     function delegatedBoostCallback(
         address claimant,
+        address receiver,
         uint amount,
         uint adjustedAmount,
         uint fee,
