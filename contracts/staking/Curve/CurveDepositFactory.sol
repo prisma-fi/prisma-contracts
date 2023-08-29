@@ -36,7 +36,6 @@ contract CurveFactory is PrismaOwnable {
 
         ICurveDepositToken(depositToken).initialize(gauge);
         curveProxy.setPerGaugeApproval(depositToken, gauge);
-        // TODO enable PRISMA emissions
 
         emit NewDeployment(gauge, depositToken);
     }

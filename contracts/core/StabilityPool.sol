@@ -726,8 +726,6 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         if (_newValue == 0) {
             delete depositSnapshots[_depositor];
 
-            // TODO do we need to clear depositSums? getDepositorCollateralGain and claimableReward
-            // both return 0 when deposits[_depositor] is zero, so we may not have to zero these values
             length = collateralTokens.length;
             for (uint256 i = 0; i < length; i++) {
                 depositSums[_depositor][i] = 0;

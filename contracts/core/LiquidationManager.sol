@@ -32,7 +32,7 @@ import "../dependencies/PrismaBase.sol";
                the remaining active troves.
 
             3. MCR <= ICR < TCR && TCR < CCR
-               The trove is liquidated using stability pool deposits. Collateral equal to 110% of
+               The trove is liquidated using stability pool deposits. Collateral equal to MCR of
                the value of the debt is distributed between stability pool depositors. The remaining
                collateral is left claimable by the trove owner.
  */
@@ -390,7 +390,7 @@ contract LiquidationManager is PrismaBase {
     }
 
     /**
-        @dev Perform a "normal" liquidation, where 100% < ICR < 110%. The trove
+        @dev Perform a "normal" liquidation, where 100% < ICR < MCR. The trove
              is liquidated as much as possible using the stability pool. Any
              remaining debt and collateral are redistributed between active troves.
      */
@@ -441,7 +441,7 @@ contract LiquidationManager is PrismaBase {
 
     /**
         @dev Attempt to liquidate a single trove in recovery mode.
-             If 110% <= ICR < current TCR (accounting for the preceding liquidations in the current sequence)
+             If MCR <= ICR < current TCR (accounting for the preceding liquidations in the current sequence)
              and there is Debt in the Stability Pool, only offset, with no redistribution,
              but at a capped rate of 1.1 and only if the whole debt can be liquidated.
              The remainder due to the capped rate will be claimable as collateral surplus.
