@@ -172,6 +172,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
         uint256 leftToPreclaim = maxTotalPreclaim - preclaimed;
         if (amount == 0) amount = leftToPreclaim > _unclaimed ? _unclaimed : leftToPreclaim;
         else if (preclaimed + amount > maxTotalPreclaim || amount > _unclaimed) revert PreclaimTooLarge();
+        amount = (amount / lockToTokenRatio) * lockToTokenRatio; // truncating the dust
         allocations[account].claimed = uint128(claimedUpdated + amount);
         allocations[account].preclaimed = uint96(preclaimed + amount);
         vestingToken.transferFrom(vault, address(this), amount);
