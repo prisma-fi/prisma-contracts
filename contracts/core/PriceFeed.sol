@@ -17,6 +17,7 @@ contract PriceFeed is PrismaOwnable {
     struct OracleRecord {
         IAggregatorV3Interface chainLinkOracle;
         uint8 decimals;
+        uint32 heartbeat;
         bytes4 sharePriceSignature;
         uint8 sharePriceDecimals;
         bool isFeedWorking;
@@ -42,6 +43,7 @@ contract PriceFeed is PrismaOwnable {
     error PriceFeed__InvalidFeedResponseError(address token);
     error PriceFeed__FeedFrozenError(address token);
     error PriceFeed__UnknownFeedError(address token);
+    error PriceFeed__HeartbeatOutOfBoundsError();
 
     // Events ---------------------------------------------------------------------------------------------------------
 
@@ -54,8 +56,8 @@ contract PriceFeed is PrismaOwnable {
     // Used to convert a chainlink price answer to an 18-digit precision uint
     uint256 public constant TARGET_DIGITS = 18;
 
-    // After this timeout, responses will be considered stale and revert
-    uint256 public constant RESPONSE_TIMEOUT = 25 hours;
+    // Responses are considered stale this many seconds after the oracle's heartbeat
+    uint256 public constant RESPONSE_TIMEOUT_BUFFER = 1 hours;
 
     // Maximum deviation allowed between two consecutive Chainlink oracle prices. 18-digit precision.
     uint256 public constant MAX_PRICE_DEVIATION_FROM_PREVIOUS_ROUND = 5e17; // 50%
@@ -66,7 +68,7 @@ contract PriceFeed is PrismaOwnable {
     mapping(address => PriceRecord) public priceRecords;
 
     constructor(address _prismaCore, address ethFeed) PrismaOwnable(_prismaCore) {
-        setOracle(address(0), ethFeed, 0, 0, false);
+        setOracle(address(0), ethFeed, 3600, 0, 0, false);
     }
 
     // Admin routines ---------------------------------------------------------------------------------------------------
@@ -75,6 +77,7 @@ contract PriceFeed is PrismaOwnable {
         @notice Set the oracle for a specific token
         @param _token Address of the LST to set the oracle for
         @param _chainlinkOracle Address of the chainlink oracle for this LST
+        @param _heartbeat Oracle heartbeat, in seconds
         @param sharePriceSignature Four byte function selector to be used when calling `_collateral`, in order to obtain the share price
         @param sharePriceDecimals Decimal precision used in the returned share price
         @param _isEthIndexed True if the base currency is ETH
@@ -82,23 +85,26 @@ contract PriceFeed is PrismaOwnable {
     function setOracle(
         address _token,
         address _chainlinkOracle,
+        uint32 _heartbeat,
         bytes4 sharePriceSignature,
         uint8 sharePriceDecimals,
         bool _isEthIndexed
     ) public onlyOwner {
+        if (_heartbeat > 86400) revert PriceFeed__HeartbeatOutOfBoundsError();
         IAggregatorV3Interface newFeed = IAggregatorV3Interface(_chainlinkOracle);
         (FeedResponse memory currResponse, FeedResponse memory prevResponse, ) = _fetchFeedResponses(newFeed, 0);
 
         if (!_isFeedWorking(currResponse, prevResponse)) {
             revert PriceFeed__InvalidFeedResponseError(_token);
         }
-        if (_isPriceStale(currResponse.timestamp)) {
+        if (_isPriceStale(currResponse.timestamp, _heartbeat)) {
             revert PriceFeed__FeedFrozenError(_token);
         }
 
         OracleRecord memory record = OracleRecord({
             chainLinkOracle: newFeed,
             decimals: newFeed.decimals(),
+            heartbeat: _heartbeat,
             sharePriceSignature: sharePriceSignature,
             sharePriceDecimals: sharePriceDecimals,
             isFeedWorking: true,
@@ -106,8 +112,9 @@ contract PriceFeed is PrismaOwnable {
         });
 
         oracleRecords[_token] = record;
+        PriceRecord memory _priceRecord = priceRecords[_token];
 
-        _processFeedResponses(_token, record, currResponse, prevResponse, priceRecords[_token]);
+        _processFeedResponses(_token, record, currResponse, prevResponse, _priceRecord);
         emit NewOracleRegistered(_token, _chainlinkOracle, _isEthIndexed);
     }
 
@@ -139,7 +146,7 @@ contract PriceFeed is PrismaOwnable {
         );
 
         if (!updated) {
-            if (_isPriceStale(priceRecord.timestamp)) {
+            if (_isPriceStale(priceRecord.timestamp, oracle.heartbeat)) {
                 revert PriceFeed__FeedFrozenError(_token);
             }
             return priceRecord.scaledPrice;
@@ -159,7 +166,7 @@ contract PriceFeed is PrismaOwnable {
     ) internal returns (uint256) {
         uint8 decimals = oracle.decimals;
         bool isValidResponse = _isFeedWorking(_currResponse, _prevResponse) &&
-            !_isPriceStale(_currResponse.timestamp) &&
+            !_isPriceStale(_currResponse.timestamp, oracle.heartbeat) &&
             !_isPriceChangeAboveMaxDeviation(_currResponse, _prevResponse, decimals);
         if (isValidResponse) {
             uint256 scaledPrice = _scalePriceByDigits(uint256(_currResponse.answer), decimals);
@@ -181,7 +188,7 @@ contract PriceFeed is PrismaOwnable {
             if (oracle.isFeedWorking) {
                 _updateFeedStatus(_token, oracle, false);
             }
-            if (_isPriceStale(priceRecord.timestamp)) {
+            if (_isPriceStale(priceRecord.timestamp, oracle.heartbeat)) {
                 revert PriceFeed__FeedFrozenError(_token);
             }
             return priceRecord.scaledPrice;
@@ -204,8 +211,8 @@ contract PriceFeed is PrismaOwnable {
         }
     }
 
-    function _isPriceStale(uint256 _priceTimestamp) internal view returns (bool) {
-        return block.timestamp - _priceTimestamp > RESPONSE_TIMEOUT;
+    function _isPriceStale(uint256 _priceTimestamp, uint256 _heartbeat) internal view returns (bool) {
+        return block.timestamp - _priceTimestamp > _heartbeat + RESPONSE_TIMEOUT_BUFFER;
     }
 
     function _isFeedWorking(
