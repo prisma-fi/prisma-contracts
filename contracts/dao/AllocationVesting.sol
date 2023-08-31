@@ -21,6 +21,8 @@ contract AllocationVesting is DelegatedOps, Ownable {
     error AllocationsMismatch();
     error ZeroTotalAllocation();
     error ZeroAllocation();
+    error ZeroNumberOfWeeks();
+    error DuplicateAllocation();
     error InsufficientPoints();
     error LockedAllocation();
     error IllegalVestingStart();
@@ -86,12 +88,15 @@ contract AllocationVesting is DelegatedOps, Ownable {
         uint256 loopEnd = allocationSplits.length;
         uint256 totalPoints;
         for (uint256 i; i < loopEnd; ) {
-            uint256 points = allocationSplits[i].points;
-            totalPoints += points;
-            if (points == 0) revert ZeroAllocation();
             address recipient = allocationSplits[i].recipient;
+            uint8 numberOfWeeks = allocationSplits[i].numberOfWeeks;
+            uint256 points = allocationSplits[i].points;
+            if (points == 0) revert ZeroAllocation();
+            if (numberOfWeeks == 0) revert ZeroNumberOfWeeks();
+            if (allocations[recipient].numberOfWeeks > 0) revert DuplicateAllocation();
+            totalPoints += points;
             allocations[recipient].points = uint24(points);
-            allocations[recipient].numberOfWeeks = allocationSplits[i].numberOfWeeks;
+            allocations[recipient].numberOfWeeks = numberOfWeeks;
             unchecked {
                 ++i;
             }
