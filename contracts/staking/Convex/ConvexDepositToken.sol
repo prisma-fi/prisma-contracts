@@ -257,16 +257,19 @@ contract ConvexDepositToken {
                 integral += (duration * rewardRate[i] * 1e18) / supply;
                 rewardIntegral[i] = integral;
             }
-            uint256 integralFor = rewardIntegralFor[account][i];
-            if (integral > integralFor) {
-                storedPendingReward[account][i] += uint128((balance * (integral - integralFor)) / 1e18);
-                rewardIntegralFor[account][i] = integral;
+            if (account != address(0)) {
+                uint256 integralFor = rewardIntegralFor[account][i];
+                if (integral > integralFor) {
+                    storedPendingReward[account][i] += uint128((balance * (integral - integralFor)) / 1e18);
+                    rewardIntegralFor[account][i] = integral;
+                }
             }
         }
     }
 
     function fetchRewards() external {
         require(block.timestamp / 1 weeks >= periodFinish / 1 weeks, "Can only fetch once per week");
+        _updateIntegrals(address(0), 0, totalSupply);
         _fetchRewards();
     }
 
