@@ -695,11 +695,9 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     }
 
     // --- Sender functions for Debt deposit, collateral gains and Prisma gains ---
-    function claimCollateralGains(address recipient, uint256[] calldata collateralIndexes) external virtual {
-        _claimCollateralGains(recipient, collateralIndexes);
-    }
+    function claimCollateralGains(address recipient, uint256[] calldata collateralIndexes) external {
+        _accrueDepositorCollateralGain(msg.sender);
 
-    function _claimCollateralGains(address recipient, uint256[] calldata collateralIndexes) internal {
         uint256 loopEnd = collateralIndexes.length;
         uint256[] memory collateralGains = new uint256[](collateralTokens.length);
 
