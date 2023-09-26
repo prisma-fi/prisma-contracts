@@ -82,22 +82,12 @@ contract LiquidationManager is PrismaBase {
         uint256 totalCollSurplus;
     }
 
-    event TroveUpdated(
-        address indexed _borrower,
-        uint256 _debt,
-        uint256 _coll,
-        uint256 _stake,
-        TroveManagerOperation _operation
-    );
-    event TroveLiquidated(address indexed _borrower, uint256 _debt, uint256 _coll, TroveManagerOperation _operation);
     event Liquidation(
         uint256 _liquidatedDebt,
         uint256 _liquidatedColl,
         uint256 _collGasCompensation,
         uint256 _debtGasCompensation
     );
-    event TroveUpdated(address indexed _borrower, uint256 _debt, uint256 _coll, uint256 stake, uint8 operation);
-    event TroveLiquidated(address indexed _borrower, uint256 _debt, uint256 _coll, uint8 operation);
 
     enum TroveManagerOperation {
         applyPendingRewards,
@@ -429,13 +419,7 @@ contract LiquidationManager is PrismaBase {
         );
 
         troveManager.closeTroveByLiquidation(_borrower);
-        emit TroveLiquidated(
-            _borrower,
-            singleLiquidation.entireTroveDebt,
-            singleLiquidation.entireTroveColl,
-            TroveManagerOperation.liquidateInNormalMode
-        );
-        emit TroveUpdated(_borrower, 0, 0, 0, TroveManagerOperation.liquidateInNormalMode);
+
         return singleLiquidation;
     }
 
@@ -487,14 +471,6 @@ contract LiquidationManager is PrismaBase {
             troveManager.addCollateralSurplus(_borrower, collSurplus);
         }
 
-        emit TroveLiquidated(
-            _borrower,
-            entireTroveDebt,
-            singleLiquidation.collToSendToSP,
-            TroveManagerOperation.liquidateInRecoveryMode
-        );
-        emit TroveUpdated(_borrower, 0, 0, 0, TroveManagerOperation.liquidateInRecoveryMode);
-
         return singleLiquidation;
     }
 
@@ -528,13 +504,7 @@ contract LiquidationManager is PrismaBase {
             singleLiquidation.collGasCompensation;
 
         troveManager.closeTroveByLiquidation(_borrower);
-        emit TroveLiquidated(
-            _borrower,
-            singleLiquidation.entireTroveDebt,
-            singleLiquidation.entireTroveColl,
-            TroveManagerOperation.liquidateInRecoveryMode
-        );
-        emit TroveUpdated(_borrower, 0, 0, 0, TroveManagerOperation.liquidateInRecoveryMode);
+
         return singleLiquidation;
     }
 

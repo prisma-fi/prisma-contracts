@@ -192,9 +192,10 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
     }
 
     enum TroveManagerOperation {
-        applyPendingRewards,
-        liquidateInNormalMode,
-        liquidateInRecoveryMode,
+        open,
+        close,
+        adjust,
+        liquidate,
         redeemCollateral
     }
 
@@ -213,13 +214,13 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         uint256 _stake,
         TroveManagerOperation _operation
     );
+
     event Redemption(
         uint256 _attemptedDebtAmount,
         uint256 _actualDebtAmount,
         uint256 _collateralSent,
         uint256 _collateralFee
     );
-    event TroveUpdated(address indexed _borrower, uint256 _debt, uint256 _coll, uint256 stake, uint8 operation);
     event BaseRateUpdated(uint256 _baseRate);
     event LastFeeOpTimeUpdated(uint256 _lastFeeOpTime);
     event TotalStakesUpdated(uint256 _newTotalStakes);
@@ -1012,6 +1013,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         uint256 _newTotalDebt = supply + _compositeDebt;
         require(_newTotalDebt + defaultedDebt <= maxSystemDebt, "Collateral debt limit reached");
         totalActiveDebt = _newTotalDebt;
+        emit TroveUpdated(_borrower, _compositeDebt, _collateralAmount, stake, TroveManagerOperation.open);
     }
 
     function updateTroveFromAdjustment(
@@ -1063,8 +1065,10 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
 
         uint256 newNICR = PrismaMath._computeNominalCR(newColl, newDebt);
         sortedTroves.reInsert(_borrower, newNICR, _upperHint, _lowerHint);
+        uint256 newStake = _updateStakeAndTotalStakes(t);
+        emit TroveUpdated(_borrower, newDebt, newColl, newStake, TroveManagerOperation.adjust);
 
-        return (newColl, newDebt, _updateStakeAndTotalStakes(t));
+        return (newColl, newDebt, newStake);
     }
 
     function closeTrove(address _borrower, address _receiver, uint256 collAmount, uint256 debtAmount) external {
@@ -1075,6 +1079,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         totalActiveDebt = totalActiveDebt - debtAmount;
         _sendCollateral(_receiver, collAmount);
         _resetState();
+        emit TroveUpdated(_borrower, 0, 0, 0, TroveManagerOperation.close);
     }
 
     /**
@@ -1199,8 +1204,6 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
                 _updateTroveRewardSnapshots(_borrower);
 
                 _movePendingTroveRewardsToActiveBalance(pendingDebtReward, pendingCollateralReward);
-
-                emit TroveUpdated(_borrower, debt, coll, t.stake, TroveManagerOperation.applyPendingRewards);
             }
             if (prevDebt != debt) {
                 t.debt = debt;
@@ -1264,6 +1267,7 @@ contract TroveManager is PrismaBase, PrismaOwnable, SystemStart {
         _removeStake(_borrower);
         _closeTrove(_borrower, Status.closedByLiquidation);
         _updateIntegralForAccount(_borrower, debtBefore, rewardIntegral);
+        emit TroveUpdated(_borrower, 0, 0, 0, TroveManagerOperation.liquidate);
     }
 
     function movePendingTroveRewardsToActiveBalances(uint256 _debt, uint256 _collateral) external {

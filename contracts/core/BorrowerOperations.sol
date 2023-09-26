@@ -75,16 +75,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         adjustTrove
     }
 
-    event TroveUpdated(
-        address indexed _borrower,
-        uint256 _debt,
-        uint256 _coll,
-        uint256 stake,
-        BorrowerOperation operation
-    );
-    event TroveCreated(address indexed _borrower, uint256 arrayIndex);
-    event TroveUpdated(address indexed _borrower, uint256 _debt, uint256 _coll, uint256 stake, uint8 operation);
-    event BorrowingFeePaid(address indexed borrower, uint256 amount);
+    event BorrowingFeePaid(address indexed borrower, IERC20 collateralToken, uint256 amount);
     event CollateralConfigured(ITroveManager troveManager, IERC20 collateralToken);
     event TroveManagerRemoved(ITroveManager troveManager);
 
@@ -208,7 +199,9 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
         vars.netDebt = _debtAmount;
 
         if (!isRecoveryMode) {
-            vars.netDebt = vars.netDebt + _triggerBorrowingFee(troveManager, account, _maxFeePercentage, _debtAmount);
+            vars.netDebt =
+                vars.netDebt +
+                _triggerBorrowingFee(troveManager, collateralToken, account, _maxFeePercentage, _debtAmount);
         }
         _requireAtLeastMinNetDebt(vars.netDebt);
 
@@ -242,15 +235,12 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
             _lowerHint,
             isRecoveryMode
         );
-        emit TroveCreated(account, vars.arrayIndex);
 
         // Move the collateral to the Trove Manager
         collateralToken.safeTransferFrom(msg.sender, address(troveManager), _collateralAmount);
 
         //  and mint the DebtAmount to the caller and gas compensation for Gas Pool
         debtToken.mintWithGasCompensation(msg.sender, _debtAmount);
-
-        emit TroveUpdated(account, vars.compositeDebt, _collateralAmount, vars.stake, BorrowerOperation.openTrove);
     }
 
     // Send collateral to a trove
@@ -367,7 +357,13 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
             _requireValidMaxFeePercentage(_maxFeePercentage);
             if (!isRecoveryMode) {
                 // If the adjustment incorporates a debt increase and system is in Normal Mode, trigger a borrowing fee
-                vars.netDebtChange += _triggerBorrowingFee(troveManager, msg.sender, _maxFeePercentage, _debtChange);
+                vars.netDebtChange += _triggerBorrowingFee(
+                    troveManager,
+                    collateralToken,
+                    msg.sender,
+                    _maxFeePercentage,
+                    _debtChange
+                );
             }
         }
 
@@ -401,8 +397,6 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
             vars.account,
             msg.sender
         );
-
-        emit TroveUpdated(vars.account, vars.newDebt, vars.newColl, vars.stake, BorrowerOperation.adjustTrove);
     }
 
     function closeTrove(ITroveManager troveManager, address account) external callerOrDelegated(account) {
@@ -424,8 +418,6 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
 
         troveManager.closeTrove(account, msg.sender, coll, debt);
 
-        emit TroveUpdated(account, 0, 0, 0, BorrowerOperation.closeTrove);
-
         // Burn the repaid Debt from the user's balance and the gas compensation from the Gas Pool
         debtToken.burnWithGasCompensation(msg.sender, debt - DEBT_GAS_COMPENSATION);
     }
@@ -434,6 +426,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
 
     function _triggerBorrowingFee(
         ITroveManager _troveManager,
+        IERC20 collateralToken,
         address _caller,
         uint256 _maxFeePercentage,
         uint256 _debtAmount
@@ -444,7 +437,7 @@ contract BorrowerOperations is PrismaBase, PrismaOwnable, DelegatedOps {
 
         debtToken.mint(PRISMA_CORE.feeReceiver(), debtFee);
 
-        emit BorrowingFeePaid(_caller, debtFee);
+        emit BorrowingFeePaid(_caller, collateralToken, debtFee);
 
         return debtFee;
     }
