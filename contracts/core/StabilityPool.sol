@@ -92,7 +92,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     // Error tracker for the error correction in the Prisma issuance calculation
     uint256 public lastPrismaError;
     // Error trackers for the error correction in the offset calculation
-    uint256 public lastCollateralError_Offset;
+    uint256[256] public lastCollateralError_Offset;
     uint256 public lastDebtLossError_Offset;
 
     mapping(uint16 => SunsetIndex) _sunsetIndexes;
@@ -398,7 +398,8 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         (uint256 collateralGainPerUnitStaked, uint256 debtLossPerUnitStaked) = _computeRewardsPerUnitStaked(
             _collToAdd,
             _debtToOffset,
-            totalDebt
+            totalDebt,
+            idx
         );
 
         _updateRewardSumAndProduct(collateralGainPerUnitStaked, debtLossPerUnitStaked, idx); // updates S and P
@@ -412,7 +413,8 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     function _computeRewardsPerUnitStaked(
         uint256 _collToAdd,
         uint256 _debtToOffset,
-        uint256 _totalDebtTokenDeposits
+        uint256 _totalDebtTokenDeposits,
+        uint256 idx
     ) internal returns (uint256 collateralGainPerUnitStaked, uint256 debtLossPerUnitStaked) {
         /*
          * Compute the Debt and collateral rewards. Uses a "feedback" error correction, to keep
@@ -425,7 +427,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
          * 4) Store these errors for use in the next correction when this function is called.
          * 5) Note: static analysis tools complain about this "division before multiplication", however, it is intended.
          */
-        uint256 collateralNumerator = (_collToAdd * DECIMAL_PRECISION) + lastCollateralError_Offset;
+        uint256 collateralNumerator = (_collToAdd * DECIMAL_PRECISION) + lastCollateralError_Offset[idx];
 
         if (_debtToOffset == _totalDebtTokenDeposits) {
             debtLossPerUnitStaked = DECIMAL_PRECISION; // When the Pool depletes to 0, so does each deposit
@@ -441,7 +443,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         }
 
         collateralGainPerUnitStaked = collateralNumerator / _totalDebtTokenDeposits;
-        lastCollateralError_Offset = collateralNumerator - (collateralGainPerUnitStaked * _totalDebtTokenDeposits);
+        lastCollateralError_Offset[idx] = collateralNumerator - (collateralGainPerUnitStaked * _totalDebtTokenDeposits);
 
         return (collateralGainPerUnitStaked, debtLossPerUnitStaked);
     }
@@ -695,7 +697,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
     }
 
     // --- Sender functions for Debt deposit, collateral gains and Prisma gains ---
-    function claimCollateralGains(address recipient, uint256[] calldata collateralIndexes) external {
+    function claimCollateralGains(address recipient, uint256[] calldata collateralIndexes) public virtual {
         _accrueDepositorCollateralGain(msg.sender);
 
         uint256 loopEnd = collateralIndexes.length;
