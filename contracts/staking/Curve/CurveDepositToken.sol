@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "../../interfaces/ICurveProxy.sol";
 import "../../interfaces/IVault.sol";
 import "../../interfaces/ILiquidityGauge.sol";
+import "../../interfaces/IGaugeController.sol";
 import "../../dependencies/PrismaOwnable.sol";
 
 /**
@@ -20,6 +21,7 @@ contract CurveDepositToken {
     IERC20 public immutable CRV;
     ICurveProxy public immutable curveProxy;
     IPrismaVault public immutable vault;
+    IGaugeController public immutable gaugeController;
 
     ILiquidityGauge public gauge;
     IERC20 public lpToken;
@@ -51,11 +53,18 @@ contract CurveDepositToken {
     event LPTokenWithdrawn(address indexed lpToken, address indexed receiver, uint256 amount);
     event RewardClaimed(address indexed receiver, uint256 prismaAmount, uint256 crvAmount);
 
-    constructor(IERC20 _prisma, IERC20 _CRV, ICurveProxy _curveProxy, IPrismaVault _vault) {
+    constructor(
+        IERC20 _prisma,
+        IERC20 _CRV,
+        ICurveProxy _curveProxy,
+        IPrismaVault _vault,
+        IGaugeController _gaugeController
+    ) {
         PRISMA = _prisma;
         CRV = _CRV;
         curveProxy = _curveProxy;
         vault = _vault;
+        gaugeController = _gaugeController;
     }
 
     function initialize(ILiquidityGauge _gauge) external {
@@ -228,11 +237,11 @@ contract CurveDepositToken {
         uint256 id = emissionId;
         if (id > 0) prismaAmount = vault.allocateNewEmissions(id);
 
-        // try/catch to allow active receiver before Curve gauge is voted in
+        // only claim with non-zero weight to allow active receiver before Curve gauge is voted in
         uint256 crvAmount;
-        try curveProxy.mintCRV(address(gauge), address(this)) returns (uint256 minted) {
-            crvAmount = minted;
-        } catch {}
+        if (gaugeController.get_gauge_weight(address(gauge)) > 0) {
+            crvAmount = curveProxy.mintCRV(address(gauge), address(this));
+        }
 
         uint256 _periodFinish = periodFinish;
         if (block.timestamp < _periodFinish) {
