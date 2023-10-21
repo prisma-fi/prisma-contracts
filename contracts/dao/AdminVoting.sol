@@ -50,7 +50,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
         bytes data;
     }
 
-    uint256 public constant BOOTSTRAP_PERIOD = 30 days;
+    uint256 public immutable BOOTSTRAP_FINISH;
     uint256 public constant VOTING_PERIOD = 1 weeks;
     uint256 public constant MIN_TIME_TO_EXECUTION = 1 days;
     uint256 public constant MAX_TIME_TO_EXECUTION = 3 weeks;
@@ -79,13 +79,16 @@ contract AdminVoting is DelegatedOps, SystemStart {
         address _prismaCore,
         ITokenLocker _tokenLocker,
         uint256 _minCreateProposalPct,
-        uint256 _passingPct
+        uint256 _passingPct,
+        uint256 _bootstrapFinish
     ) SystemStart(_prismaCore) {
         tokenLocker = _tokenLocker;
         prismaCore = IPrismaCore(_prismaCore);
 
         minCreateProposalPct = _minCreateProposalPct;
         passingPct = _passingPct;
+
+        BOOTSTRAP_FINISH = _bootstrapFinish;
     }
 
     /**
@@ -168,12 +171,13 @@ contract AdminVoting is DelegatedOps, SystemStart {
         uint256 _passingPct;
         bool isSetGuardianPayload = _isSetGuardianPayload(payload.length, payload[0]);
         if (isSetGuardianPayload) {
-            require(block.timestamp > startTime + BOOTSTRAP_PERIOD, "Cannot change guardian during bootstrap");
+            require(block.timestamp > BOOTSTRAP_FINISH, "Cannot change guardian during bootstrap");
             _passingPct = SET_GUARDIAN_PASSING_PCT;
         } else _passingPct = passingPct;
 
         uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
         uint40 requiredWeight = uint40((totalWeight * _passingPct) / MAX_PCT);
+
         uint256 idx = proposalData.length;
         proposalData.push(
             Proposal({
