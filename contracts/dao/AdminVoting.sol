@@ -177,7 +177,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
 
         uint256 totalWeight = tokenLocker.getTotalWeightAt(week);
         uint40 requiredWeight = uint40((totalWeight * _passingPct) / MAX_PCT);
-
+        require(requiredWeight > 0, "Not enough total lock weight");
         uint256 idx = proposalData.length;
         proposalData.push(
             Proposal({
@@ -301,6 +301,7 @@ contract AdminVoting is DelegatedOps, SystemStart {
      */
     function setPassingPct(uint256 pct) external returns (bool) {
         require(msg.sender == address(this), "Only callable via proposal");
+        require(pct > 0, "pct must be nonzero");
         require(pct <= MAX_PCT, "Invalid value");
         passingPct = pct;
         emit ProposalPassingPctSet(pct);
