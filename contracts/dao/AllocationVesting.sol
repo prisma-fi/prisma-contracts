@@ -27,6 +27,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
     error LockedAllocation();
     error IllegalVestingStart();
     error VestingAlreadyStarted();
+    error SelfTransfer();
     error IncompatibleVestingPeriod(uint256 numberOfWeeksFrom, uint256 numberOfWeeksTo);
 
     struct AllocationSplit {
@@ -112,6 +113,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
      * @param points Number of points to transfer
      */
     function transferPoints(address from, address to, uint256 points) external callerOrDelegated(from) {
+        if (from == to) revert SelfTransfer();
         AllocationState memory fromAllocation = allocations[from];
         AllocationState memory toAllocation = allocations[to];
         uint8 numberOfWeeksFrom = fromAllocation.numberOfWeeks;
