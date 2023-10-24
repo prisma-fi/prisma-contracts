@@ -2,10 +2,8 @@
 
 pragma solidity 0.8.19;
 
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { DelegatedOps } from "../dependencies/DelegatedOps.sol";
-import { PrismaOwnable } from "../dependencies/PrismaOwnable.sol";
 import { ITokenLocker } from "../interfaces/ITokenLocker.sol";
 
 /**
@@ -13,7 +11,7 @@ import { ITokenLocker } from "../interfaces/ITokenLocker.sol";
  * @author PrismaFi
  * @notice Vesting contract which allows transfer of future vesting claims
  */
-contract AllocationVesting is DelegatedOps, Ownable {
+contract AllocationVesting is DelegatedOps {
     error NothingToClaim();
     error CannotLock();
     error WrongMaxTotalPreclaimPct();
@@ -25,8 +23,6 @@ contract AllocationVesting is DelegatedOps, Ownable {
     error DuplicateAllocation();
     error InsufficientPoints();
     error LockedAllocation();
-    error IllegalVestingStart();
-    error VestingAlreadyStarted();
     error SelfTransfer();
     error IncompatibleVestingPeriod(uint256 numberOfWeeksFrom, uint256 numberOfWeeksTo);
 
@@ -44,7 +40,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
     }
 
     // This number should allow a good precision in allocation fractions
-    uint256 private constant TOTAL_POINTS = 100000;
+    uint256 private immutable totalPoints;
     // Users allocations
     mapping(address => AllocationState) public allocations;
     // max percentage of one's vest that can be preclaimed in total
@@ -56,14 +52,16 @@ contract AllocationVesting is DelegatedOps, Ownable {
     ITokenLocker public immutable tokenLocker;
     uint256 public immutable lockToTokenRatio;
     // Vesting timeline starting timestamp
-    uint256 public vestingStart;
+    uint256 public immutable vestingStart;
 
     constructor(
         IERC20 vestingToken_,
         ITokenLocker tokenLocker_,
         uint256 totalAllocation_,
         address vault_,
-        uint256 maxTotalPreclaimPct_
+        uint256 maxTotalPreclaimPct_,
+        uint256 vestingStart_,
+        AllocationSplit[] memory allocationSplits
     ) {
         if (totalAllocation_ == 0) revert ZeroTotalAllocation();
         if (maxTotalPreclaimPct_ > 20) revert WrongMaxTotalPreclaimPct();
@@ -73,21 +71,10 @@ contract AllocationVesting is DelegatedOps, Ownable {
         totalAllocation = totalAllocation_;
         lockToTokenRatio = tokenLocker_.lockToTokenRatio();
         maxTotalPreclaimPct = maxTotalPreclaimPct_;
-    }
 
-    /**
-     *
-     * @notice Set allocations and starts vesting
-     * @param allocationSplits Allocations to be set
-     * @param vestingStart_ Start of the vesting timeline
-     * @dev This can be called only once by the owner
-     */
-    function setAllocations(AllocationSplit[] calldata allocationSplits, uint256 vestingStart_) external onlyOwner {
-        if (vestingStart_ < block.timestamp || block.timestamp + 5 weeks < vestingStart_) revert IllegalVestingStart();
-        if (vestingStart != 0) revert VestingAlreadyStarted();
         vestingStart = vestingStart_;
         uint256 loopEnd = allocationSplits.length;
-        uint256 totalPoints;
+        uint256 total;
         for (uint256 i; i < loopEnd; ) {
             address recipient = allocationSplits[i].recipient;
             uint8 numberOfWeeks = allocationSplits[i].numberOfWeeks;
@@ -95,14 +82,14 @@ contract AllocationVesting is DelegatedOps, Ownable {
             if (points == 0) revert ZeroAllocation();
             if (numberOfWeeks == 0) revert ZeroNumberOfWeeks();
             if (allocations[recipient].numberOfWeeks > 0) revert DuplicateAllocation();
-            totalPoints += points;
+            total += points;
             allocations[recipient].points = uint24(points);
             allocations[recipient].numberOfWeeks = numberOfWeeks;
             unchecked {
                 ++i;
             }
         }
-        if (totalPoints != TOTAL_POINTS) revert AllocationsMismatch();
+        totalPoints = total;
     }
 
     /**
@@ -167,7 +154,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
         if (_claimableAt(block.timestamp, allocation.points, allocation.claimed, allocation.numberOfWeeks) > 0) {
             claimedUpdated = _claim(account, allocation.points, allocation.claimed, allocation.numberOfWeeks);
         }
-        uint256 userAllocation = (allocation.points * totalAllocation) / TOTAL_POINTS;
+        uint256 userAllocation = (allocation.points * totalAllocation) / totalPoints;
         uint256 _unclaimed = userAllocation - claimedUpdated;
         uint256 preclaimed = allocation.preclaimed;
         uint256 maxTotalPreclaim = (maxTotalPreclaimPct * userAllocation) / 100;
@@ -234,7 +221,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
         uint256 vestingEnd = vestingStart + vestingWeeks;
         uint256 endTime = when >= vestingEnd ? vestingEnd : when;
         uint256 timeSinceStart = endTime - vestingStart;
-        vested = (totalAllocation * timeSinceStart * points) / (TOTAL_POINTS * vestingWeeks);
+        vested = (totalAllocation * timeSinceStart * points) / (totalPoints * vestingWeeks);
     }
 
     /**
@@ -244,7 +231,7 @@ contract AllocationVesting is DelegatedOps, Ownable {
      */
     function unclaimed(address account) external view returns (uint256) {
         AllocationState memory allocation = allocations[account];
-        uint256 accountAllocation = (totalAllocation * allocation.points) / TOTAL_POINTS;
+        uint256 accountAllocation = (totalAllocation * allocation.points) / totalPoints;
         return accountAllocation - allocation.claimed;
     }
 }
