@@ -35,16 +35,17 @@ contract AirdropDistributor is Ownable {
     address public immutable vault;
 
     uint256 private immutable lockToTokenRatio;
-    uint256 private constant MAX_LOCK_WEEKS = 52;
+    uint256 private immutable CLAIM_LOCK_WEEKS;
     uint256 public constant CLAIM_DURATION = 13 weeks;
 
     event Claimed(address indexed claimant, address indexed receiver, uint256 index, uint256 amount);
     event MerkleRootSet(bytes32 root, uint256 canClaimUntil);
 
-    constructor(IERC20 _token, ITokenLocker _locker, address _vault) {
+    constructor(IERC20 _token, ITokenLocker _locker, address _vault, uint256 lockWeeks) {
         token = _token;
         locker = _locker;
         vault = _vault;
+        CLAIM_LOCK_WEEKS = lockWeeks;
 
         lockToTokenRatio = _locker.lockToTokenRatio();
     }
@@ -104,7 +105,7 @@ contract AirdropDistributor is Ownable {
 
         _setClaimed(index);
         token.transferFrom(vault, address(this), amount * lockToTokenRatio);
-        locker.lock(receiver, amount, MAX_LOCK_WEEKS);
+        locker.lock(receiver, amount, CLAIM_LOCK_WEEKS);
 
         if (claimant != receiver) {
             address callback = claimCallback[receiver];
