@@ -105,22 +105,26 @@ contract AllocationVesting is DelegatedOps {
         AllocationState memory toAllocation = allocations[to];
         uint8 numberOfWeeksFrom = fromAllocation.numberOfWeeks;
         uint8 numberOfWeeksTo = toAllocation.numberOfWeeks;
+        uint256 pointsFrom = fromAllocation.points;
         if (numberOfWeeksTo != 0 && numberOfWeeksTo != numberOfWeeksFrom)
             revert IncompatibleVestingPeriod(numberOfWeeksFrom, numberOfWeeksTo);
-        uint256 totalVested = _vestedAt(block.timestamp, fromAllocation.points, numberOfWeeksFrom);
+        uint256 totalVested = _vestedAt(block.timestamp, pointsFrom, numberOfWeeksFrom);
         if (totalVested < fromAllocation.claimed) revert LockedAllocation();
         if (points == 0) revert ZeroAllocation();
-        if (fromAllocation.points < points) revert InsufficientPoints();
+        if (pointsFrom < points) revert InsufficientPoints();
         // We claim one last time before transfer
-        uint256 claimed = _claim(from, fromAllocation.points, fromAllocation.claimed, numberOfWeeksFrom);
+        uint256 claimed = _claim(from, pointsFrom, fromAllocation.claimed, numberOfWeeksFrom);
         // Passive balance to transfer
         uint128 claimedAdjustment = uint128((claimed * points) / fromAllocation.points);
-        allocations[from].points = uint24(fromAllocation.points - points);
-        // we don't use fromAllocation as it's been modified with _claim()
+        allocations[from].points = uint24(pointsFrom - points);
+        // we can't use fromAllocation.claimed since the storage value was modified by the _claim() call
         allocations[from].claimed = allocations[from].claimed - claimedAdjustment;
-
         allocations[to].points = toAllocation.points + uint24(points);
         allocations[to].claimed = toAllocation.claimed + claimedAdjustment;
+        // Transfer preclaimed pro-rata to avoid limit gaming
+        uint256 preclaimedToTransfer = (fromAllocation.preclaimed * points) / pointsFrom;
+        allocations[to].preclaimed = uint96(toAllocation.preclaimed + preclaimedToTransfer);
+        allocations[from].preclaimed = uint96(fromAllocation.preclaimed - preclaimedToTransfer);
         if (numberOfWeeksTo == 0) {
             allocations[to].numberOfWeeks = numberOfWeeksFrom;
         }
@@ -233,5 +237,19 @@ contract AllocationVesting is DelegatedOps {
         AllocationState memory allocation = allocations[account];
         uint256 accountAllocation = (totalAllocation * allocation.points) / totalPoints;
         return accountAllocation - allocation.claimed;
+    }
+
+    /**
+     * @notice Calculates the total number of tokens left to preclaim
+     * @param account Account to calculate for
+     * @return Preclaimable tokens
+     */
+    function preclaimable(address account) external view returns (uint256) {
+        AllocationState memory allocation = allocations[account];
+        if (allocation.points == 0 || vestingStart == 0) return 0;
+        uint256 userAllocation = (allocation.points * totalAllocation) / totalPoints;
+        uint256 preclaimed = allocation.preclaimed;
+        uint256 maxTotalPreclaim = (maxTotalPreclaimPct * userAllocation) / 100;
+        return maxTotalPreclaim - preclaimed;
     }
 }
