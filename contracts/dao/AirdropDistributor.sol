@@ -14,12 +14,13 @@ interface IClaimCallback {
 }
 
 /**
-    @title Prisma veCRV Airdrop Distributor
-    @notice Distributes PRISMA to veCRV holders that voted in favor of
-            Prisma's initial Curve governance proposal.
-    @dev Airdropped PRISMA tokens are given as a one year locked position.
-         Distribution is via a merkle proof. The proof and script used
-         to create are available on Github: https://github.com/prisma-fi
+    @title Prisma Airdrop Distributor
+    @notice Distributes PRISMA to veCRV holders that voted in favor of Prisma's
+            initial Curve governance proposal, and to early users who interacted
+            with the protocol prior to token emissions.
+    @dev Airdropped PRISMA tokens are given as a locked position. Distribution
+         is via a merkle proof. The proof and script used to create are available
+         on Github: https://github.com/prisma-fi/airdrop-proofs
  */
 contract AirdropDistributor is Ownable {
     using Address for address;
