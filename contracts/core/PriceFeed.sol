@@ -67,8 +67,21 @@ contract PriceFeed is PrismaOwnable {
     mapping(address => OracleRecord) public oracleRecords;
     mapping(address => PriceRecord) public priceRecords;
 
-    constructor(address _prismaCore, address ethFeed) PrismaOwnable(_prismaCore) {
-        setOracle(address(0), ethFeed, 3600, 0, 0, false);
+    struct OracleSetup {
+        address token;
+        address chainlink;
+        uint32 heartbeat;
+        bytes4 sharePriceSignature;
+        uint8 sharePriceDecimals;
+        bool isEthIndexed;
+    }
+
+    constructor(address _prismaCore, address ethFeed, OracleSetup[] memory oracles) PrismaOwnable(_prismaCore) {
+        _setOracle(address(0), ethFeed, 3600, 0, 0, false);
+        for (uint i = 0; i < oracles.length; i++) {
+            OracleSetup memory o = oracles[i];
+            _setOracle(o.token, o.chainlink, o.heartbeat, o.sharePriceSignature, o.sharePriceDecimals, o.isEthIndexed);
+        }
     }
 
     // Admin routines ---------------------------------------------------------------------------------------------------
@@ -89,7 +102,18 @@ contract PriceFeed is PrismaOwnable {
         bytes4 sharePriceSignature,
         uint8 sharePriceDecimals,
         bool _isEthIndexed
-    ) public onlyOwner {
+    ) external onlyOwner {
+        _setOracle(_token, _chainlinkOracle, _heartbeat, sharePriceSignature, sharePriceDecimals, _isEthIndexed);
+    }
+
+    function _setOracle(
+        address _token,
+        address _chainlinkOracle,
+        uint32 _heartbeat,
+        bytes4 sharePriceSignature,
+        uint8 sharePriceDecimals,
+        bool _isEthIndexed
+    ) internal {
         if (_heartbeat > 86400) revert PriceFeed__HeartbeatOutOfBoundsError();
         IAggregatorV3Interface newFeed = IAggregatorV3Interface(_chainlinkOracle);
         (FeedResponse memory currResponse, FeedResponse memory prevResponse, ) = _fetchFeedResponses(newFeed, 0);
@@ -129,30 +153,37 @@ contract PriceFeed is PrismaOwnable {
      */
     function fetchPrice(address _token) public returns (uint256) {
         PriceRecord memory priceRecord = priceRecords[_token];
+        OracleRecord memory oracle = oracleRecords[_token];
 
-        if (priceRecord.lastUpdated == block.timestamp) {
-            // We short-circuit only if the price was already correct in the current block
-            return priceRecord.scaledPrice;
-        }
-        if (priceRecord.lastUpdated == 0) {
-            revert PriceFeed__UnknownFeedError(_token);
-        }
-
-        OracleRecord storage oracle = oracleRecords[_token];
-
-        (FeedResponse memory currResponse, FeedResponse memory prevResponse, bool updated) = _fetchFeedResponses(
-            oracle.chainLinkOracle,
-            priceRecord.roundId
-        );
-
-        if (!updated) {
-            if (_isPriceStale(priceRecord.timestamp, oracle.heartbeat)) {
-                revert PriceFeed__FeedFrozenError(_token);
+        uint256 scaledPrice = priceRecord.scaledPrice;
+        // We short-circuit only if the price was already correct in the current block
+        if (priceRecord.lastUpdated != block.timestamp) {
+            if (priceRecord.lastUpdated == 0) {
+                revert PriceFeed__UnknownFeedError(_token);
             }
-            return priceRecord.scaledPrice;
+
+            (FeedResponse memory currResponse, FeedResponse memory prevResponse, bool updated) = _fetchFeedResponses(
+                oracle.chainLinkOracle,
+                priceRecord.roundId
+            );
+
+            if (updated) {
+                scaledPrice = _processFeedResponses(_token, oracle, currResponse, prevResponse, priceRecord);
+            } else {
+                if (_isPriceStale(priceRecord.timestamp, oracle.heartbeat)) {
+                    revert PriceFeed__FeedFrozenError(_token);
+                }
+
+                priceRecord.lastUpdated = uint32(block.timestamp);
+                priceRecords[_token] = priceRecord;
+            }
         }
 
-        return _processFeedResponses(_token, oracle, currResponse, prevResponse, priceRecord);
+        if (oracle.isEthIndexed) {
+            uint256 ethPrice = fetchPrice(address(0));
+            return (ethPrice * scaledPrice) / 1 ether;
+        }
+        return scaledPrice;
     }
 
     // Internal functions -----------------------------------------------------------------------------------------------
@@ -175,10 +206,6 @@ contract PriceFeed is PrismaOwnable {
                 require(success, "Share price not available");
                 scaledPrice = (scaledPrice * abi.decode(returnData, (uint256))) / (10 ** oracle.sharePriceDecimals);
             }
-            if (oracle.isEthIndexed) {
-                // Oracle returns ETH price, need to convert to USD
-                scaledPrice = _calcEthPrice(scaledPrice);
-            }
             if (!oracle.isFeedWorking) {
                 _updateFeedStatus(_token, oracle, true);
             }
@@ -193,11 +220,6 @@ contract PriceFeed is PrismaOwnable {
             }
             return priceRecord.scaledPrice;
         }
-    }
-
-    function _calcEthPrice(uint256 ethAmount) internal returns (uint256) {
-        uint256 ethPrice = fetchPrice(address(0));
-        return (ethPrice * ethAmount) / 1 ether;
     }
 
     function _fetchFeedResponses(
