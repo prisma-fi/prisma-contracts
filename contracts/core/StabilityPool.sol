@@ -577,7 +577,7 @@ contract StabilityPool is PrismaOwnable, SystemStart {
         uint256 initialDeposit = accountDeposits[_depositor].amount;
 
         if (totalDebt == 0 || initialDeposit == 0) {
-            return 0;
+            return storedPendingReward[_depositor];
         }
         uint256 prismaNumerator = (_vestedEmissions() * DECIMAL_PRECISION) + lastPrismaError;
         uint256 prismaPerUnitStaked = prismaNumerator / totalDebt;
@@ -596,7 +596,11 @@ contract StabilityPool is PrismaOwnable, SystemStart {
             secondPortion = (epochToScaleToG[epochSnapshot][scaleSnapshot + 1] + marginalPrismaGain) / SCALE_FACTOR;
         }
 
-        return (initialDeposit * (firstPortion + secondPortion)) / snapshots.P / DECIMAL_PRECISION;
+        return
+            storedPendingReward[_depositor] +
+            (initialDeposit * (firstPortion + secondPortion)) /
+            snapshots.P /
+            DECIMAL_PRECISION;
     }
 
     function _claimableReward(address _depositor) private view returns (uint256) {
