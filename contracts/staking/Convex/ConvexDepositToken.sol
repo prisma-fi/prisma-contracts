@@ -36,7 +36,7 @@ interface IConvexStash {
             Tokens are minted by depositing Curve LP tokens, and burned to receive the LP
             tokens back. Holders may claim PRISMA emissions on top of the earned CRV and CVX.
  */
-contract ConvexDepositToken {
+contract ConvexDepositToken is PrismaOwnable {
     IERC20 public immutable PRISMA;
     IERC20 public immutable CRV;
     IERC20 public immutable CVX;
@@ -72,6 +72,12 @@ contract ConvexDepositToken {
     uint32 public lastUpdate;
     uint32 public periodFinish;
 
+    // maximum percent of weekly emissions that can be directed to this receiver,
+    // as a whole number out of 10000. emissions greater than this amount are stored
+    // until `Vault.lockWeeks() == 0` and then returned to the unallocated supply.
+    uint16 public maxWeeklyEmissionPct;
+    uint128 public storedExcessEmissions;
+
     mapping(address => uint256[3]) public rewardIntegralFor;
     mapping(address => uint128[3]) private storedPendingReward;
 
@@ -82,8 +88,18 @@ contract ConvexDepositToken {
     event LPTokenDeposited(address indexed lpToken, address indexed receiver, uint256 amount);
     event LPTokenWithdrawn(address indexed lpToken, address indexed receiver, uint256 amount);
     event RewardClaimed(address indexed receiver, uint256 prismaAmount, uint256 crvAmount, uint256 cvxAmount);
+    event MaxWeeklyEmissionPctSet(uint256 pct);
+    event MaxWeeklyEmissionsExceeded(uint256 allocated, uint256 maxAllowed);
 
-    constructor(IERC20 _prisma, IERC20 _CRV, IERC20 _CVX, IBooster _booster, ICurveProxy _proxy, IPrismaVault _vault) {
+    constructor(
+        IERC20 _prisma,
+        IERC20 _CRV,
+        IERC20 _CVX,
+        IBooster _booster,
+        ICurveProxy _proxy,
+        IPrismaVault _vault,
+        address prismaCore
+    ) PrismaOwnable(prismaCore) {
         PRISMA = _prisma;
         CRV = _CRV;
         CVX = _CVX;
@@ -105,12 +121,23 @@ contract ConvexDepositToken {
         cvxRewards = IBaseRewardPool(_rewards);
 
         IERC20(_lpToken).approve(address(booster), type(uint256).max);
+        PRISMA.approve(address(vault), type(uint256).max);
 
         string memory _symbol = IERC20Metadata(_lpToken).symbol();
         name = string.concat("Prisma ", _symbol, " Convex Deposit");
         symbol = string.concat("prisma-", _symbol);
 
         periodFinish = uint32(block.timestamp - 1);
+        maxWeeklyEmissionPct = 10000;
+        emit MaxWeeklyEmissionPctSet(10000);
+    }
+
+    function setMaxWeeklyEmissionPct(uint16 _maxWeeklyEmissionPct) external onlyOwner returns (bool) {
+        require(_maxWeeklyEmissionPct < 10001, "Invalid maxWeeklyEmissionPct");
+        maxWeeklyEmissionPct = _maxWeeklyEmissionPct;
+
+        emit MaxWeeklyEmissionPctSet(_maxWeeklyEmissionPct);
+        return true;
     }
 
     function notifyRegisteredId(uint256[] memory assignedIds) external returns (bool) {
@@ -267,6 +294,20 @@ contract ConvexDepositToken {
         }
     }
 
+    function pushExcessEmissions() external {
+        _pushExcessEmissions(0);
+    }
+
+    function _pushExcessEmissions(uint256 newAmount) internal {
+        if (vault.lockWeeks() > 0) storedExcessEmissions = uint128(storedExcessEmissions + newAmount);
+        else {
+            uint256 excess = storedExcessEmissions + newAmount;
+            storedExcessEmissions = 0;
+            vault.transferAllocatedTokens(address(this), address(this), excess);
+            vault.increaseUnallocatedSupply(PRISMA.balanceOf(address(this)));
+        }
+    }
+
     function fetchRewards() external {
         require(block.timestamp / 1 weeks >= periodFinish / 1 weeks, "Can only fetch once per week");
         _updateIntegrals(address(0), 0, totalSupply);
@@ -279,6 +320,17 @@ contract ConvexDepositToken {
         if (id > 0) prismaAmount = vault.allocateNewEmissions(id);
         crvRewards.getReward(address(this), false);
         cvxRewards.getReward();
+
+        // apply max weekly emission limit
+        uint256 maxWeekly = maxWeeklyEmissionPct;
+        if (maxWeekly < 10000) {
+            maxWeekly = (vault.weeklyEmissions(vault.getWeek()) * maxWeekly) / 10000;
+            if (prismaAmount > maxWeekly) {
+                emit MaxWeeklyEmissionsExceeded(prismaAmount, maxWeekly);
+                _pushExcessEmissions(prismaAmount - maxWeekly);
+                prismaAmount = maxWeekly;
+            }
+        }
 
         uint256 last = lastCrvBalance;
         uint256 crvAmount = CRV.balanceOf(address(this)) - last;
