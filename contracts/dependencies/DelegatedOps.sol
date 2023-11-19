@@ -17,6 +17,8 @@ pragma solidity 0.8.19;
             minted tokens to the caller.
  */
 contract DelegatedOps {
+    event DelegateApprovalSet(address indexed caller, address indexed delegate, bool isApproved);
+
     mapping(address owner => mapping(address caller => bool isApproved)) public isApprovedDelegate;
 
     modifier callerOrDelegated(address _account) {
@@ -26,5 +28,6 @@ contract DelegatedOps {
 
     function setDelegateApproval(address _delegate, bool _isApproved) external {
         isApprovedDelegate[msg.sender][_delegate] = _isApproved;
+        emit DelegateApprovalSet(msg.sender, _delegate, _isApproved);
     }
 }
