@@ -403,7 +403,7 @@ contract TokenLocker is PrismaOwnable, SystemStart {
             return weight;
         }
 
-        while (updatedWeek < systemWeek) {
+        while (updatedWeek < week) {
             updatedWeek++;
             weight -= rate;
             rate -= totalWeeklyUnlocks[updatedWeek];
