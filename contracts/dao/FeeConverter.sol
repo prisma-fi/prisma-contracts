@@ -28,6 +28,40 @@ interface ICryptoSwap {
     function token() external view returns (address);
 }
 
+contract AddLiquidityChecker is PrismaOwnable {
+    ICryptoSwap public immutable curvePool;
+
+    uint256 public constant MAX_PCT = 10000;
+
+    // maximum deviation percent between `price_oracle` and `price_scale` when
+    // adding liquidity on `curvePool`. protects against sandwich attacks.
+    uint256 public maxDeviation;
+
+    constructor(address _core, ICryptoSwap _curve, uint256 _maxDeviation) PrismaOwnable(_core) {
+        curvePool = _curve;
+        maxDeviation = _maxDeviation;
+    }
+
+    function setMaxDeviation(uint256 _maxDeviation) public onlyOwner {
+        require(_maxDeviation <= MAX_PCT, "Invalid maxDeviation");
+
+        maxDeviation = uint16(_maxDeviation);
+    }
+
+    function canAddLiquidity(address caller, uint256 amountToAdd) external view returns (bool) {
+        uint256 priceOracle = curvePool.price_oracle();
+        uint256 priceScale = curvePool.price_scale();
+
+        if (priceOracle > priceScale) {
+            uint256 delta = priceOracle - priceScale;
+            return (delta * MAX_PCT) / priceOracle < maxDeviation;
+        } else {
+            uint256 delta = priceScale - priceOracle;
+            return (delta * MAX_PCT) / priceScale < maxDeviation;
+        }
+    }
+}
+
 contract FeeConverter is PrismaOwnable, SystemStart {
     using SafeERC20 for IERC20;
 
@@ -43,13 +77,9 @@ contract FeeConverter is PrismaOwnable, SystemStart {
 
     ITroveManager[] public troveManagers;
 
-    uint16 public updatedWeek;
+    AddLiquidityChecker public addLiquidityChecker;
 
-    // maximum amount of `debtToken` distributed in a week, as an absolute value.
-    uint88 public maxWeeklyDebtAmount;
-    // maximum percentage of `debtToken` distrubted in a week, relative to the
-    // amount within the fee receiver.
-    uint16 public maxWeeklyDebtPct;
+    uint16 public updatedWeek;
 
     // target percent of liquidity within `curvePool` that the protocol should
     // own. if the actual owned percent is less than this, a portion of the
@@ -59,19 +89,26 @@ contract FeeConverter is PrismaOwnable, SystemStart {
     // liquidity is below the target percent.
     uint16 public weeklyDebtPOLPct;
 
-    // maximum deviation percent between `price_oracle` and `price_scale` when
-    // adding liquidity on `curvePool`. protects against sandwich attacks.
-    uint16 public maxLpDeviation;
+    // maximum percentage of `debtToken` distrubted in a week, relative to the
+    // amount within the fee receiver.
+    uint16 public maxWeeklyDebtPct;
+    // maximum amount of `debtToken` distributed in a week, as an absolute value.
+    uint88 public maxWeeklyDebtAmount;
+
+    // debt amount allocated to POL that was not added due to unfavorable conditions
+    uint88 public pendingPOLDebtAmount;
 
     // amount of `debtToken` send to caller each week for processing fees
-    uint88 public callerIncentive;
+    // if no POL is added, only half of this amount is given
+    uint80 public callerIncentive;
 
     // collateral -> is for sale via `swapCollateralForDebt`?
     mapping(address collateral => bool isForSale) public isSellingCollateral;
 
     event WeeklyDebtParamsSet(uint256 maxWeeklyDebtAmount, uint256 maxWeeklyDebtPct);
-    event POLParamsSet(uint256 targetPOLPct, uint256 weeklyDebtPOLPct, uint256 maxLpDeviation);
+    event POLParamsSet(uint256 targetPOLPct, uint256 weeklyDebtPOLPct);
     event CallerIncentiveSet(uint256 callerIncentive);
+    event AddLiquidityCheckerSet(address addLiquidityChecker);
     event IsSellingCollateralSet(address[] collaterals, bool isSelling);
 
     event CollateralSold(
@@ -82,26 +119,21 @@ contract FeeConverter is PrismaOwnable, SystemStart {
         uint256 amountReceived
     );
 
-    event LiquidityAdded(
-        uint256 priceOracle,
-        uint256 priceScale,
-        uint256 debtAmount,
-        uint256 prismaAmount,
-        uint256 lpAmountReceived
-    );
+    event LiquidityAdded(uint256 priceScale, uint256 debtAmount, uint256 prismaAmount, uint256 lpAmountReceived);
 
     event TroveManagersSynced();
     event InterestCollected();
     event FeeTokenDeposited(uint256 amount);
     event CallerIncentivePaid(address indexed caller, uint256 amount);
+    event PendingPOLDebtUpdated(uint256 amount);
 
     struct InitialParams {
         uint88 maxWeeklyDebtAmount;
         uint16 maxWeeklyDebtPct;
         uint16 targetPOLPct;
         uint16 weeklyDebtPOLPct;
-        uint16 maxLpDeviation;
-        uint88 callerIncentive;
+        uint80 callerIncentive;
+        AddLiquidityChecker addLiquidityChecker;
         address[] sellCollaterals;
     }
 
@@ -126,7 +158,8 @@ contract FeeConverter is PrismaOwnable, SystemStart {
         _prismaToken.approve(address(_curvePool), type(uint256).max);
 
         setWeeklyDebtParams(initialParams.maxWeeklyDebtAmount, initialParams.maxWeeklyDebtPct);
-        setPOLParams(initialParams.targetPOLPct, initialParams.weeklyDebtPOLPct, initialParams.maxLpDeviation);
+        setPOLParams(initialParams.targetPOLPct, initialParams.weeklyDebtPOLPct);
+        setAddLiquidityChecker(initialParams.addLiquidityChecker);
         setCallerIncentive(initialParams.callerIncentive);
         setIsSellingCollateral(initialParams.sellCollaterals, true);
 
@@ -141,19 +174,23 @@ contract FeeConverter is PrismaOwnable, SystemStart {
         emit WeeklyDebtParamsSet(_maxWeeklyDebtAmount, _maxWeeklyDebtPct);
     }
 
-    function setPOLParams(uint256 _targetPOLPct, uint256 _weeklyDebtPOLPct, uint256 _maxLpDeviation) public onlyOwner {
+    function setPOLParams(uint256 _targetPOLPct, uint256 _weeklyDebtPOLPct) public onlyOwner {
         require(_targetPOLPct <= MAX_PCT, "Invalid targetPOLPct");
         require(_weeklyDebtPOLPct <= MAX_PCT, "Invalid weeklyDebtPOLPct");
-        require(_maxLpDeviation <= MAX_PCT, "Invalid maxLpDeviation");
         targetPOLPct = uint16(_targetPOLPct);
         weeklyDebtPOLPct = uint16(_weeklyDebtPOLPct);
-        maxLpDeviation = uint16(_maxLpDeviation);
 
-        emit POLParamsSet(_targetPOLPct, _weeklyDebtPOLPct, _maxLpDeviation);
+        emit POLParamsSet(_targetPOLPct, _weeklyDebtPOLPct);
+    }
+
+    function setAddLiquidityChecker(AddLiquidityChecker _checker) public onlyOwner {
+        addLiquidityChecker = _checker;
+
+        emit AddLiquidityCheckerSet(address(_checker));
     }
 
     function setCallerIncentive(uint256 _callerIncentive) public onlyOwner {
-        callerIncentive = uint88(_callerIncentive);
+        callerIncentive = uint80(_callerIncentive);
 
         emit CallerIncentiveSet(_callerIncentive);
     }
@@ -213,7 +250,7 @@ contract FeeConverter is PrismaOwnable, SystemStart {
 
     /**
         @notice Update the local storage array of trove managers
-        @dev Should be called whenever a trove manager is added or removed
+        @dev Should be called whenever a trove manager is added
      */
     function syncTroveManagers() public returns (bool) {
         uint256 newLength = factory.troveManagerCount();
@@ -262,18 +299,39 @@ contract FeeConverter is PrismaOwnable, SystemStart {
         if (amount > maxDebt) amount = maxDebt;
         debtToken.transferFrom(receiver, address(this), amount);
 
-        // transfer `callerIncentive` to caller - thank you for your service!
-        debtToken.transfer(msg.sender, callerIncentive);
-        amount -= callerIncentive;
-        emit CallerIncentivePaid(msg.sender, callerIncentive);
+        // deduct `callerIncentive` from amount
+        uint256 incentive = callerIncentive;
+        amount -= incentive;
 
         // add liquidity to `curveLpPool`
+        bool addedLiquidity;
         uint256 polPct = weeklyDebtPOLPct;
         if (polPct > 0) {
             if ((curvePoolLp.balanceOf(receiver) * MAX_PCT) / curvePoolLp.totalSupply() < targetPOLPct) {
                 uint256 polAmount = (amount * polPct) / MAX_PCT;
-                amount -= _addLiquidity(polAmount, receiver);
+                amount -= polAmount;
+                polAmount += pendingPOLDebtAmount;
+
+                if (addLiquidityChecker.canAddLiquidity(msg.sender, polAmount)) {
+                    uint256 added = _addLiquidity(polAmount, receiver);
+                    addedLiquidity = true;
+                    pendingPOLDebtAmount = uint88(polAmount - added);
+                    emit PendingPOLDebtUpdated(polAmount - added);
+                } else {
+                    pendingPOLDebtAmount = uint88(polAmount);
+                    emit PendingPOLDebtUpdated(polAmount);
+                }
             }
+        }
+
+        // transfer `callerIncentive` to caller - thank you for your service!
+        if (incentive != 0) {
+            if (!addedLiquidity) {
+                incentive /= 2;
+                amount += incentive;
+            }
+            debtToken.transfer(msg.sender, incentive);
+            emit CallerIncentivePaid(msg.sender, incentive);
         }
 
         // deposit to `feeDistributor`
@@ -285,17 +343,36 @@ contract FeeConverter is PrismaOwnable, SystemStart {
         return true;
     }
 
-    function _addLiquidity(uint256 debtAmount, address receiver) internal returns (uint256) {
-        uint256 priceOracle = curvePool.price_oracle();
-        uint256 priceScale = curvePool.price_scale();
-
-        if (priceOracle > priceScale) {
-            uint256 delta = priceOracle - priceScale;
-            require((delta * MAX_PCT) / priceOracle < maxLpDeviation, "LP price too volatile");
-        } else {
-            uint256 delta = priceScale - priceOracle;
-            require((delta * MAX_PCT) / priceScale < maxLpDeviation, "LP price too volatile");
+    /**
+        @notice Add any pending liquidity
+        @dev Reverts if the liquidity checker disallows
+     */
+    function addPendingLiquidity() external returns (bool) {
+        uint256 amount = pendingPOLDebtAmount;
+        if (amount > 0) {
+            require(addLiquidityChecker.canAddLiquidity(msg.sender, amount), "Blocked by liquidityChecker");
+            uint added = _addLiquidity(amount, PRISMA_CORE.feeReceiver());
+            pendingPOLDebtAmount = uint88(amount - added);
+            emit PendingPOLDebtUpdated(amount - added);
         }
+        return true;
+    }
+
+    function recoverToken(IERC20 token) external onlyOwner returns (bool) {
+        uint256 amount = token.balanceOf(address(this));
+        if (amount > 0) {
+            if (token == debtToken) {
+                // if recovering `debtToken`, need to zero pending POL amount or things break
+                pendingPOLDebtAmount = 0;
+                emit PendingPOLDebtUpdated(0);
+            }
+            token.transfer(PRISMA_CORE.feeReceiver(), amount);
+        }
+        return true;
+    }
+
+    function _addLiquidity(uint256 debtAmount, address receiver) internal returns (uint256) {
+        uint256 priceScale = curvePool.price_scale();
 
         uint256 prismaAmount = (debtAmount * 1e18) / priceScale;
         uint256 prismaAvailable = prismaToken.balanceOf(receiver);
@@ -310,7 +387,7 @@ contract FeeConverter is PrismaOwnable, SystemStart {
         prismaToken.transferFrom(receiver, address(this), prismaAmount);
         uint256 lpAmount = curvePool.add_liquidity([debtAmount, prismaAmount], 0, false, receiver);
 
-        emit LiquidityAdded(priceOracle, priceScale, debtAmount, prismaAmount, lpAmount);
+        emit LiquidityAdded(priceScale, debtAmount, prismaAmount, lpAmount);
         return debtAmount;
     }
 }
