@@ -366,7 +366,7 @@ contract FeeConverter is PrismaOwnable, SystemStart {
                 pendingPOLDebtAmount = 0;
                 emit PendingPOLDebtUpdated(0);
             }
-            token.transfer(PRISMA_CORE.feeReceiver(), amount);
+            token.safeTransfer(PRISMA_CORE.feeReceiver(), amount);
         }
         return true;
     }
