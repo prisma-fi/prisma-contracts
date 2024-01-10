@@ -795,9 +795,8 @@ contract StabilityPool is PrismaOwnable, SystemStart {
             // we update only if the snapshot has changed
             if (debtLoss > 0 || hasGains || amount > 0) {
                 // Update deposit
-                uint256 newDeposit = compoundedDebtDeposit;
-                accountDeposits[account] = AccountDeposit({ amount: uint128(newDeposit), timestamp: depositTimestamp });
-                _updateSnapshots(account, newDeposit);
+                accountDeposits[account] = AccountDeposit({ amount: uint128(compoundedDebtDeposit), timestamp: depositTimestamp });
+                _updateSnapshots(account, compoundedDebtDeposit);
             }
         }
         uint256 pending = storedPendingReward[account];
