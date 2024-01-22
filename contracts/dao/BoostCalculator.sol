@@ -3,128 +3,226 @@
 pragma solidity 0.8.19;
 
 import "../interfaces/ITokenLocker.sol";
+import "../dependencies/PrismaOwnable.sol";
 import "../dependencies/SystemStart.sol";
 
 /**
     @title Prisma Boost Calculator
     @notice "Boost" refers to a bonus to claimable PRISMA tokens that an account
-            receives based on it's locked PRISMA weight. An account with "Max boost"
-            is earning PRISMA rewards at 2x the rate of an account that is unboosted.
-            Boost works as follows:
+            receives based on it's locked PRISMA weight. An account with "max boost"
+            is earning PRISMA rewards at a multiplier `maxBoostMultiplier` compared
+            to the rate of an account that is unboosted.
 
-            * In a given week, the percentage of the weekly PRISMA rewards that an
-            account can claim with maximum boost is the same as the percentage
-            of PRISMA lock weight that the account has, relative to the total lock
-            weight.
-            * Once an account's weekly claims exceed the amount allowed with max boost,
-            the boost rate decays linearly from 2x to 1x. This decay occurs over the same
-            amount of tokens that were available for maximum boost.
-            * Once an account's weekly claims are more than double the amount allowed for
-            max boost, the boost bonus is fully depleted.
-            * At the start of the next week, boost amounts are recalculated.
+            There are three phases of boost:
+
+            1. The "max boost" phase, where claimed rewards are given at the maximum
+            possible multiplier.
+            2. The "decay" phase, where claimed rewards receive a linearly decaying
+            boost multiplier.
+            3. The "no boost" phase, where claimed rewards receive no multiplier.
+
+            The amounts an account can claim with max and decaying boost are based
+            on the percentage of lock weight that the account has, relative to the
+            total lock weight. This percent is multiplied by `maxBoostablePct` or
+            `decayBoostPct` to determine the final amount.
+
+            At the start of each epoch, boost amounts are reset and the claim limits are
+            recalculated according to the lock weight at the end of the previous epoch.
 
             As an example:
 
-            * At the end of week 1, Alice has a lock weight of 100. There is a total
+            * At the end of epoch 1, Alice has a lock weight of 100. There is a total
               lock weight of 1,000. Alice controls 10% of the total lock weight.
-            * During week 2, a total of 500,000 new PRISMA rewards are made available
-            * Because Alice has 10% of the lock weight in week 1, during week 2 she
-              can claim up to 10% of the rewards (50,000 PRISMA) with her full boost.
-            * Once Alice's weekly claim exceeds 50,000 PRISMA, her boost decays linearly
-              as she claims another 50,000 PRISMA.
-            * Once Alice's weekly claims exceed 100,000 PRISMA, any further claims are
-              "unboosted" and receive only half as many tokens as they would have boosted.
-            * At the start of the next week, Alice's boost is fully replenished. She still
-              controls 10% of the total lock weight, so she can claim another 10% of this
-              week's emissions at full boost.
+            * During epoch 2, a total of 500,000 new PRISMA rewards are made available.
+            * `maxBoostablePct` is set to 200. This means that during epoch 2, Alice
+              can claim up to 20% (10% * 200%) of the rewards (100,000 PRISMA) with the
+              maximum boost multiplier.
+            * Once Alice's claims exceed 100,000 PRISMA, she enters the decay phase.
+              `decayBoostPct` is set to 50, meaning Alice can claim up to 5% (10% * 50%) of
+              the rewards (25,000 PRISMA) with a decaying boost.
+            * Once Alice's claims exceed 125,000 PRISMA, any further claims that epoch
+              receive no boost.
+            * At the start of the next epoch, Alice's boost is fully replenished. She still
+              controls 10% of the total lock weight, so she can claim another 20% of this
+              epoch's emissions at full boost.
 
             Note that boost is applied at the time of claiming a reward, not at the time
             the reward was earned. An account that has depleted it's boost may opt to wait
-            for the start of the next week in order to claim with a larger boost.
+            for the start of the next epoch in order to claim with a larger boost.
 
             On a technical level, we consider the full earned reward to be the maximum
-            boosted amount. "Unboosted" is more accurately described as "paying a 50%
-            penalty". Rewards that go undistributed due to claims with lowered boost
+            boosted amount. "Unboosted" is more accurately described as "receiving a reduced
+            reward amount". Rewards that are undistributed due to claims with lowered boost
             are returned to the unallocated token supply, and distributed again in the
-            emissions of future weeks.
+            emissions of future epochs.
  */
-contract BoostCalculator is SystemStart {
+contract BoostCalculator is PrismaOwnable, SystemStart {
     ITokenLocker public immutable locker;
 
-    // initial number of weeks where all accounts recieve max boost
-    uint256 public immutable MAX_BOOST_GRACE_WEEKS;
+    // initial number of epochs where all accounts recieve max boost
+    uint256 public immutable MAX_BOOST_GRACE_EPOCHS;
 
-    // week -> total weekly lock weight
+    // epoch -> total epoch lock weight
     // tracked locally to avoid repeated external calls
-    uint40[65535] totalWeeklyWeights;
-    // account -> week -> % of lock weight (where 1e9 represents 100%)
-    mapping(address account => uint32[65535]) accountWeeklyLockPct;
+    uint40[65535] totalEpochWeights;
+    // account -> epoch -> % of lock weight (where 1e9 represents 100%)
+    mapping(address account => uint32[65535]) accountEpochLockPct;
 
-    constructor(address _prismaCore, ITokenLocker _locker, uint256 _graceWeeks) SystemStart(_prismaCore) {
-        require(_graceWeeks > 0, "Grace weeks cannot be 0");
+    // max boost multiplier as a whole number
+    uint8 public maxBoostMultiplier;
+
+    // percentage of the total epoch emissions that an account can claim with max
+    // boost, expressed as a percent relative to the account's percent of the total
+    // lock weight. For example, if an account has 5% of the lock weight and the
+    // max boostable percent is 150, the account can claim 7.5% (5% * 150%) of the
+    // epoch's emissions at a max boost.
+    uint16 public maxBoostablePct;
+    // percentage of the total epoch emissions that an account can claim with
+    // decaying boost. Works the same as `maxBoostablePct`.
+    uint16 public decayBoostPct;
+
+    // pending boost multiplier and percentages that take effect in the next epoch
+    uint8 public pendingMaxBoostMultiplier;
+    uint16 public pendingMaxBoostablePct;
+    uint16 public pendingDecayBoostPct;
+    uint16 public paramChangeEpoch;
+
+    event BoostParamsSet(
+        uint256 maxBoostMultiplier,
+        uint256 maxBoostablePct,
+        uint256 decayBoostPct,
+        uint256 paramChangeEpoch
+    );
+
+    constructor(
+        address _prismaCore,
+        ITokenLocker _locker,
+        uint256 _graceEpochs,
+        uint8 _maxBoostMul,
+        uint16 _maxBoostPct,
+        uint16 _decayPct
+    ) PrismaOwnable(_prismaCore) SystemStart(_prismaCore) {
         locker = _locker;
-        MAX_BOOST_GRACE_WEEKS = _graceWeeks + getWeek();
+        MAX_BOOST_GRACE_EPOCHS = _graceEpochs + getWeek();
+
+        maxBoostMultiplier = _maxBoostMul;
+        maxBoostablePct = _maxBoostPct;
+        decayBoostPct = _decayPct;
+
+        emit BoostParamsSet(_maxBoostMul, _maxBoostPct, _decayPct, getWeek());
+    }
+
+    /**
+        @notice Set boost parameters
+        @dev New parameters take effect in the following epoch
+        @param maxBoostMul Maximum boost multiplier
+        @param maxBoostPct Percentage of the total epoch emissions that an account
+                           can claim with max boost, as a percent relative to the
+                           account's percent of the total lock weight.
+        @param decayPct Percentage of the total epoch emissions that an account
+                        can claim with decaying boost, as a percent relative to the
+                         account's percent of the total lock weight.
+     */
+    function setBoostParams(uint8 maxBoostMul, uint16 maxBoostPct, uint16 decayPct) external onlyOwner returns (bool) {
+        require(maxBoostMul > 0, "Invalid maxBoostMul");
+        pendingMaxBoostMultiplier = maxBoostMul;
+        pendingMaxBoostablePct = maxBoostPct;
+        pendingDecayBoostPct = decayPct;
+        paramChangeEpoch = uint16(getWeek());
+
+        emit BoostParamsSet(maxBoostMul, maxBoostPct, decayPct, getWeek());
+        return true;
+    }
+
+    /**
+        @notice Get the remaining claimable amounts this epoch that will receive boost
+        @param account address to query boost amounts for
+        @param previousAmount Amount that was already claimed in the current epoch
+        @param totalEpochEmissions Total PRISMA emissions released this epoch
+        @return maxBoosted remaining claimable amount that will receive max boost
+        @return boosted remaining claimable amount that will receive some amount of boost (including max boost)
+     */
+    function getClaimableWithBoost(
+        address account,
+        uint256 previousAmount,
+        uint256 totalEpochEmissions
+    ) external view returns (uint256 maxBoosted, uint256 boosted) {
+        uint256 epoch = getWeek();
+        if (epoch < MAX_BOOST_GRACE_EPOCHS) {
+            uint256 remaining = totalEpochEmissions - previousAmount;
+            return (remaining, remaining);
+        }
+        epoch -= 1;
+
+        uint256 accountWeight = locker.getAccountWeightAt(account, epoch);
+        uint256 totalWeight = locker.getTotalWeightAt(epoch);
+        if (totalWeight == 0) totalWeight = 1;
+        uint256 pct = (1e9 * accountWeight) / totalWeight;
+        if (pct == 0) return (0, 0);
+
+        uint256 maxBoostMul;
+        uint256 maxBoostable;
+        uint256 fullDecay;
+        if (paramChangeEpoch != 0 && paramChangeEpoch <= epoch) {
+            maxBoostMul = pendingMaxBoostMultiplier;
+            (maxBoostable, fullDecay) = _getBoostable(
+                totalEpochEmissions,
+                pct,
+                pendingMaxBoostablePct,
+                pendingDecayBoostPct
+            );
+        } else {
+            maxBoostMul = maxBoostMultiplier;
+            (maxBoostable, fullDecay) = _getBoostable(totalEpochEmissions, pct, maxBoostablePct, decayBoostPct);
+        }
+
+        return (
+            previousAmount >= maxBoostable ? 0 : maxBoostable - previousAmount,
+            previousAmount >= fullDecay ? 0 : fullDecay - previousAmount
+        );
     }
 
     /**
         @notice Get the adjusted claim amount after applying an account's boost
         @param account Address claiming the reward
         @param amount Amount being claimed (assuming maximum boost)
-        @param previousAmount Amount that was already claimed in the current week
-        @param totalWeeklyEmissions Total PRISMA emissions released this week
+        @param previousAmount Amount that was already claimed this epoch
+        @param totalEpochEmissions Total PRISMA emissions released this epoch
         @return adjustedAmount Amount of PRISMA received after applying boost
      */
     function getBoostedAmount(
         address account,
         uint256 amount,
         uint256 previousAmount,
-        uint256 totalWeeklyEmissions
+        uint256 totalEpochEmissions
     ) external view returns (uint256 adjustedAmount) {
-        uint256 week = getWeek();
-        if (week < MAX_BOOST_GRACE_WEEKS) return amount;
-        week -= 1;
+        uint256 epoch = getWeek();
+        if (epoch < MAX_BOOST_GRACE_EPOCHS) return amount;
+        epoch -= 1;
 
-        uint256 accountWeight = locker.getAccountWeightAt(account, week);
-        uint256 totalWeight = locker.getTotalWeightAt(week);
+        uint256 accountWeight = locker.getAccountWeightAt(account, epoch);
+        uint256 totalWeight = locker.getTotalWeightAt(epoch);
         if (totalWeight == 0) totalWeight = 1;
         uint256 pct = (1e9 * accountWeight) / totalWeight;
         if (pct == 0) pct = 1;
-        return _getBoostedAmount(amount, previousAmount, totalWeeklyEmissions, pct);
-    }
 
-    /**
-        @notice Get the remaining claimable amounts this week that will receive boost
-        @param claimant address to query boost amounts for
-        @param previousAmount Amount that was already claimed in the current week
-        @param totalWeeklyEmissions Total PRISMA emissions released this week
-        @return maxBoosted remaining claimable amount that will receive max boost
-        @return boosted remaining claimable amount that will receive some amount of boost (including max boost)
-     */
-    function getClaimableWithBoost(
-        address claimant,
-        uint256 previousAmount,
-        uint256 totalWeeklyEmissions
-    ) external view returns (uint256 maxBoosted, uint256 boosted) {
-        uint256 week = getWeek();
-        if (week < MAX_BOOST_GRACE_WEEKS) {
-            uint256 remaining = totalWeeklyEmissions - previousAmount;
-            return (remaining, remaining);
+        uint256 maxBoostMul;
+        uint256 maxBoostable;
+        uint256 fullDecay;
+        if (paramChangeEpoch != 0 && paramChangeEpoch <= epoch) {
+            maxBoostMul = pendingMaxBoostMultiplier;
+            (maxBoostable, fullDecay) = _getBoostable(
+                totalEpochEmissions,
+                pct,
+                pendingMaxBoostablePct,
+                pendingDecayBoostPct
+            );
+        } else {
+            maxBoostMul = maxBoostMultiplier;
+            (maxBoostable, fullDecay) = _getBoostable(totalEpochEmissions, pct, maxBoostablePct, decayBoostPct);
         }
-        week -= 1;
 
-        uint256 accountWeight = locker.getAccountWeightAt(claimant, week);
-        uint256 totalWeight = locker.getTotalWeightAt(week);
-        if (totalWeight == 0) totalWeight = 1;
-        uint256 pct = (1e9 * accountWeight) / totalWeight;
-        if (pct == 0) return (0, 0);
-
-        uint256 maxBoostable = (totalWeeklyEmissions * pct) / 1e9;
-        uint256 fullDecay = maxBoostable * 2;
-
-        return (
-            previousAmount >= maxBoostable ? 0 : maxBoostable - previousAmount,
-            previousAmount >= fullDecay ? 0 : fullDecay - maxBoostable
-        );
+        return _getBoostedAmount(amount, previousAmount, pct, maxBoostMul, maxBoostable, fullDecay);
     }
 
     /**
@@ -132,56 +230,86 @@ contract BoostCalculator is SystemStart {
         @dev Stores lock weights and percents to reduce cost on future calls
         @param account Address claiming the reward
         @param amount Amount being claimed (assuming maximum boost)
-        @param previousAmount Amount that was already claimed in the current week
-        @param totalWeeklyEmissions Total PRISMA emissions released this week
+        @param previousAmount Amount that was already claimed this epoch
+        @param totalEpochEmissions Total PRISMA emissions released this epoch
         @return adjustedAmount Amount of PRISMA received after applying boost
      */
     function getBoostedAmountWrite(
         address account,
         uint256 amount,
         uint256 previousAmount,
-        uint256 totalWeeklyEmissions
+        uint256 totalEpochEmissions
     ) external returns (uint256 adjustedAmount) {
-        uint256 week = getWeek();
-        if (week < MAX_BOOST_GRACE_WEEKS) return amount;
-        week -= 1;
+        uint256 epoch = getWeek();
+        if (epoch < MAX_BOOST_GRACE_EPOCHS) return amount;
+        epoch -= 1;
 
-        uint256 pct = accountWeeklyLockPct[account][week];
-        if (pct == 0) {
-            uint256 totalWeight = totalWeeklyWeights[week];
-            if (totalWeight == 0) {
-                totalWeight = locker.getTotalWeightAt(week);
-                if (totalWeight == 0) totalWeight = 1;
-                totalWeeklyWeights[week] = uint40(totalWeight);
-            }
-
-            uint256 accountWeight = locker.getAccountWeightAt(account, week);
-            pct = (1e9 * accountWeight) / totalWeight;
-            if (pct == 0) pct = 1;
-            accountWeeklyLockPct[account][week] = uint32(pct);
+        // check for and apply new boost parameters
+        uint256 pending = paramChangeEpoch;
+        if (pending != 0 && pending <= epoch) {
+            maxBoostMultiplier = pendingMaxBoostMultiplier;
+            maxBoostablePct = pendingMaxBoostablePct;
+            decayBoostPct = pendingDecayBoostPct;
+            pendingMaxBoostMultiplier = 0;
+            pendingMaxBoostablePct = 0;
+            pendingDecayBoostPct = 0;
+            paramChangeEpoch = 0;
         }
 
-        return _getBoostedAmount(amount, previousAmount, totalWeeklyEmissions, pct);
+        uint256 lockPct = accountEpochLockPct[account][epoch];
+        if (lockPct == 0) {
+            uint256 totalWeight = totalEpochWeights[epoch];
+            if (totalWeight == 0) {
+                totalWeight = locker.getTotalWeightAt(epoch);
+                if (totalWeight == 0) totalWeight = 1;
+                totalEpochWeights[epoch] = uint40(totalWeight);
+            }
+
+            uint256 accountWeight = locker.getAccountWeightAt(account, epoch);
+            lockPct = (1e9 * accountWeight) / totalWeight;
+            if (lockPct == 0) lockPct = 1;
+            accountEpochLockPct[account][epoch] = uint32(lockPct);
+        }
+
+        (uint256 maxBoostable, uint256 fullDecay) = _getBoostable(
+            totalEpochEmissions,
+            lockPct,
+            maxBoostablePct,
+            decayBoostPct
+        );
+
+        return _getBoostedAmount(amount, previousAmount, lockPct, maxBoostMultiplier, maxBoostable, fullDecay);
+    }
+
+    function _getBoostable(
+        uint256 totalEpochEmissions,
+        uint256 lockPct,
+        uint256 maxBoostPct,
+        uint256 decayPct
+    ) internal pure returns (uint256, uint256) {
+        uint256 maxBoostable = (totalEpochEmissions * lockPct * maxBoostPct) / 1e11;
+        uint256 fullDecay = maxBoostable + (totalEpochEmissions * lockPct * decayPct) / 1e11;
+        return (maxBoostable, fullDecay);
     }
 
     function _getBoostedAmount(
         uint256 amount,
         uint256 previousAmount,
-        uint256 totalWeeklyEmissions,
-        uint256 pct
+        uint256 lockPct,
+        uint256 maxBoostMul,
+        uint256 maxBoostable,
+        uint256 fullDecay
     ) internal pure returns (uint256 adjustedAmount) {
         // we use 1 to indicate no lock weight: no boost
-        if (pct == 1) return amount / 2;
+        if (lockPct == 1) return amount / maxBoostMul;
 
         uint256 total = amount + previousAmount;
-        uint256 maxBoostable = (totalWeeklyEmissions * pct) / 1e9;
-        uint256 fullDecay = maxBoostable * 2;
 
         // entire claim receives max boost
         if (maxBoostable >= total) return amount;
 
         // entire claim receives no boost
-        if (fullDecay <= previousAmount) return amount / 2;
+        if (fullDecay <= previousAmount) return amount / maxBoostMul;
 
         // apply max boost for partial claim
         if (previousAmount < maxBoostable) {
@@ -192,23 +320,53 @@ contract BoostCalculator is SystemStart {
 
         // apply no boost for partial claim
         if (total > fullDecay) {
-            adjustedAmount += (total - fullDecay) / 2;
+            adjustedAmount += (total - fullDecay) / maxBoostMul;
             amount -= (total - fullDecay);
+            total = amount + previousAmount;
         }
 
         // simplified calculation if remaining claim is the entire decay amount
-        if (amount == maxBoostable) return adjustedAmount + ((maxBoostable * 3) / 4);
+        uint256 decay = fullDecay - maxBoostable;
+        if (amount == decay) return adjustedAmount + ((decay / maxBoostMul) * (maxBoostMul + 1)) / 2;
 
-        // remaining calculations handle claim that spans only part of the decay
+        /**
+            calculate adjusted amount when the claim spans only part of the decay. we can
+            visualize the decay calculation as a right angle triangle:
 
-        // get adjusted amount based on the final boost
-        uint256 finalBoosted = amount - (amount * (previousAmount + amount - maxBoostable)) / maxBoostable / 2;
-        adjustedAmount += finalBoosted;
+             * the X axis runs from 0 to `(fullDecay - maxBoostable) / MAX_BOOST_MULTIPLIER`
+             * the Y axis runs from 1 to `MAX_BOOST_MULTIPLER`
 
-        // get adjusted amount based on the initial boost
-        uint256 initialBoosted = amount - (amount * (previousAmount - maxBoostable)) / maxBoostable / 2;
-        // with linear decay, adjusted amount is half of the difference between initial and final boost amounts
-        adjustedAmount += (initialBoosted - finalBoosted) / 2;
+            we slice the triangle at two points along the x axis, based on the previously claimed
+            amount and the new amount to claim. we then divide this new shape into another right
+            angle triangle and a rectangle, calculate and sum the areas. the sum is the final
+            adjusted amount.
+         */
+
+        // x axis calculations (+1e9 precision multiplier)
+        // length of the original triangle
+        uint unboostedTotal = (decay * 1e9) / maxBoostMul;
+        // point for first slice
+        uint claimStart = ((previousAmount - maxBoostable) * 1e9) / maxBoostMul;
+        // point for second slice
+        uint claimEnd = ((total - maxBoostable) * 1e9) / maxBoostMul;
+        // length of the slice
+        uint claimDelta = claimEnd - claimStart;
+
+        // y axis calculations (+1e9 precision multiplier)
+        uint ymul = 1e9 * (maxBoostMul - 1);
+        // boost at the first slice
+        uint boostStart = (ymul * (unboostedTotal - claimStart)) / unboostedTotal + 1e9;
+        // boost at the 2nd slice
+        uint boostEnd = (ymul * (unboostedTotal - claimEnd)) / unboostedTotal + 1e9;
+
+        // area calculations
+        // area of the new right angle triangle within our slice of the old triangle
+        uint decayAmount = (claimDelta * (boostStart - boostEnd)) / 2;
+        // area of the rectangular section within our slice of the old triangle
+        uint fullAmount = claimDelta * boostEnd;
+
+        // sum areas and remove precision multipliers
+        adjustedAmount += (decayAmount + fullAmount) / 1e18;
 
         return adjustedAmount;
     }
